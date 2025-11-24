@@ -650,19 +650,27 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
         return null;
       };
 
-      // Check if URL is a seller profile URL
+      // Check if URL is a seller profile URL (only supported marketplaces)
       const isSellerProfileUrl = (url: string): boolean => {
         if (!url) return false;
         const urlLower = url.toLowerCase();
         const patterns = [
-          /jiji\.ng\/sellerpage/,
-          /jiji\.ng\/shop/,
-          /facebook\.com\/marketplace\/profile/,
-          /facebook\.com\/.*\/marketplace/,
-          /etsy\.com\/shop/,
-          /craigslist\.org\/.*\/.*\.html/,
-          /offerup\.com\/user/,
-          /offerup\.com\/profile/
+          // Jiji patterns
+          /jiji\.ng\/sellerpage\/[^\/\?\s]+/i,
+          /jiji\.ng\/shop\/[^\/\?\s]+/i,
+          // Etsy patterns
+          /etsy\.com\/shop\/[^\/\?\s]+/i,
+          // eBay patterns
+          /ebay\.com\/str\/[^\/\?\s]+/i,
+          /ebay\.com\/usr\/[^\/\?\s]+/i,
+          // Jumia patterns
+          /jumia\.com\.ng\/seller\/[^\/]+\/profile/i,
+          /jumia\.com\/seller\/[^\/]+\/profile/i,
+          // Konga patterns
+          /konga\.com\/merchant\/[^\/\?\s]+/i,
+          // Kijiji patterns
+          /kijiji\.ca\/o-profile\/[^\/\?\s]+/i,
+          /kijiji\.com\/o-profile\/[^\/\?\s]+/i
         ];
         return patterns.some(pattern => pattern.test(urlLower));
       };

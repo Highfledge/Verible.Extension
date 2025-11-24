@@ -21,12 +21,23 @@ function getRuntimeAPI() {
   return null;
 }
 
+// Cache for seller analysis results (reduces API calls)
+const analysisCache = new Map<string, {
+  data: any;
+  timestamp: number;
+  expiresAt: number;
+}>();
+
+// Cache expiration time: 5 minutes
+const CACHE_EXPIRY_MS = 5 * 60 * 1000;
+
+// Debounce timer for URL changes
+let urlChangeDebounceTimer: number | null = null;
+let lastProcessedUrl = '';
+
 export default defineContentScript({
   matches: [
-    '*://*.facebook.com/marketplace/*',
     '*://*.jiji.ng/*',
-    '*://*.craigslist.org/*',
-    '*://*.offerup.com/*',
     '*://*.ebay.com/*',
     '*://*.etsy.com/*',
     '*://*.jumia.com.ng/*',
@@ -52,14 +63,57 @@ export default defineContentScript({
     } else {
       initializeVerible();
     }
+    
+    // Monitor URL changes for SPA navigation
+    setupUrlChangeMonitoring();
   },
 });
+
+// Setup URL change monitoring for SPA navigation
+function setupUrlChangeMonitoring() {
+  let lastUrl = window.location.href;
+  
+  // Monitor URL changes using MutationObserver and popstate
+  const checkUrlChange = () => {
+    const currentUrl = window.location.href;
+    if (currentUrl !== lastUrl) {
+      lastUrl = currentUrl;
+      console.log('Verible: URL changed, re-initializing:', currentUrl);
+      
+      // Debounce to avoid excessive calls
+      if (urlChangeDebounceTimer) {
+        clearTimeout(urlChangeDebounceTimer);
+      }
+      
+      urlChangeDebounceTimer = window.setTimeout(() => {
+        if (currentUrl !== lastProcessedUrl) {
+          lastProcessedUrl = currentUrl;
+          initializeVerible();
+        }
+      }, 200); // 200ms debounce (reduced from 500ms for faster detection)
+    }
+  };
+  
+  // Listen for popstate (back/forward navigation)
+  window.addEventListener('popstate', checkUrlChange);
+  
+  // Monitor DOM changes that might indicate navigation
+  const observer = new MutationObserver(checkUrlChange);
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+  
+  // Also check periodically (fallback for SPAs that don't trigger events)
+  setInterval(checkUrlChange, 1000); // Reduced from 2000ms to 1000ms for faster detection
+}
 
 function initializeVerible() {
   // Detect which marketplace we're on
   const platform = detectMarketplace();
   if (!platform) {
     console.log('Verible: No marketplace detected for:', window.location.href);
+    removeVeribleBadge();
     return;
   }
 
@@ -69,23 +123,24 @@ function initializeVerible() {
   const currentUrl = window.location.href;
   const currentPath = window.location.pathname;
   
-  // More strict patterns - must have the seller profile path
+  // Improved patterns for supported marketplaces only
   const sellerProfilePatterns = [
-    /jiji\.ng\/sellerpage/,
-    /jiji\.ng\/shop/,
-    /facebook\.com\/marketplace\/profile/,
-    /facebook\.com\/.*\/marketplace/,
-    /etsy\.com\/shop\/[^\/\?\s]+/,  // Etsy shop pages (e.g., etsy.com/shop/ISewNeedItCrafts)
-    /craigslist\.org\/.*\/.*\.html/,
-    /offerup\.com\/user/,
-    /offerup\.com\/profile/,
-    /ebay\.com\/str\/[^\/\?]+/,  // eBay store pages
-    /ebay\.com\/usr\/[^\/\?]+/,  // eBay user pages
-    /jumia\.com\.ng\/seller\/[^\/]+\/profile/,  // Jumia seller profile
-    /jumia\.com\/seller\/[^\/]+\/profile/,  // Jumia seller profile (other countries)
-    /konga\.com\/merchant\/[^\/\?]+/,  // Konga merchant pages
-    /kijiji\.ca\/o-profile\/[^\/\?]+/,  // Kijiji profile pages
-    /kijiji\.com\/o-profile\/[^\/\?]+/   // Kijiji profile pages (US)
+    // Jiji patterns
+    /jiji\.ng\/sellerpage\/[^\/\?\s]+/i,
+    /jiji\.ng\/shop\/[^\/\?\s]+/i,
+    // Etsy patterns
+    /etsy\.com\/shop\/[^\/\?\s]+/i,  // Etsy shop pages
+    // eBay patterns
+    /ebay\.com\/str\/[^\/\?\s]+/i,  // eBay store pages
+    /ebay\.com\/usr\/[^\/\?\s]+/i,  // eBay user pages
+    // Jumia patterns
+    /jumia\.com\.ng\/seller\/[^\/]+\/profile/i,
+    /jumia\.com\/seller\/[^\/]+\/profile/i,
+    // Konga patterns
+    /konga\.com\/merchant\/[^\/\?\s]+/i,
+    // Kijiji patterns
+    /kijiji\.ca\/o-profile\/[^\/\?\s]+/i,
+    /kijiji\.com\/o-profile\/[^\/\?\s]+/i
   ];
 
   const isSellerProfile = sellerProfilePatterns.some(pattern => {
@@ -95,6 +150,7 @@ function initializeVerible() {
     }
     return matches;
   });
+  
   console.log('Verible: URL check:', { 
     currentUrl, 
     isSellerProfile, 
@@ -118,29 +174,47 @@ function initializeVerible() {
   if (isSellerProfile) {
     console.log('Verible: Detected seller profile page, notifying background script:', currentUrl);
     
-    // Show loading badge on the page
-    showVeribleBadge(currentUrl, true); // true = loading state
+    // Always remove existing badge first when navigating to new seller
+    removeVeribleBadge();
     
+    // Check cache first (fast path)
+    const cached = getCachedAnalysis(currentUrl);
+    if (cached) {
+      console.log('Verible: Using cached analysis result');
+      showVeribleBadge(currentUrl, false, cached.data);
+      return;
+    }
+    
+    // OPTIMIZATION: Start API call immediately, show badge in parallel
     const runtime = getRuntimeAPI();
     if (runtime) {
-      runtime.sendMessage({
+      // Send message immediately (don't wait for badge to show)
+      const apiCallPromise = runtime.sendMessage({
         type: 'DETECT_SELLER_PAGE',
         data: { profileUrl: currentUrl, platform }
-      })
-      .then((response: any) => {
-        console.log('Verible: Background script response:', response);
-        if (response && response.success && response.data) {
-          // Update badge with actual score and message
-          showVeribleBadge(currentUrl, false, response.data);
-        } else {
-          // Show error state
-          showVeribleBadge(currentUrl, false, null, response?.error || 'Failed to analyze');
-        }
-      })
-      .catch((error: any) => {
-        console.error('Verible: Error notifying background script:', error);
-        showVeribleBadge(currentUrl, false, null, 'Error analyzing seller');
       });
+      
+      // Show loading badge in parallel (non-blocking)
+      showVeribleBadge(currentUrl, true); // true = loading state
+      
+      // Handle response
+      apiCallPromise
+        .then((response: any) => {
+          console.log('Verible: Background script response:', response);
+          if (response && response.success && response.data) {
+            // Cache the result
+            cacheAnalysis(currentUrl, response.data);
+            // Update badge with actual score and message
+            showVeribleBadge(currentUrl, false, response.data);
+          } else {
+            // Show error state
+            showVeribleBadge(currentUrl, false, null, response?.error || 'Failed to analyze');
+          }
+        })
+        .catch((error: any) => {
+          console.error('Verible: Error notifying background script:', error);
+          showVeribleBadge(currentUrl, false, null, 'Error analyzing seller');
+        });
     } else {
       console.error('Verible: Cannot send message - runtime API not available');
       showVeribleBadge(currentUrl, false, null, 'Extension error');
@@ -150,31 +224,58 @@ function initializeVerible() {
     // Remove badge if it exists
     removeVeribleBadge();
   }
-  
-  // Note: We're using the badge instead of the overlay now, so we don't need to inject the overlay
-  // The badge provides all the information needed
 }
 
-function detectMarketplace(): string | null {
-  const hostname = window.location.hostname;
-  
-  if (hostname.includes('facebook.com') && window.location.pathname.includes('/marketplace/')) {
-    return 'facebook';
+// Cache management functions
+function cacheAnalysis(url: string, data: any) {
+  const now = Date.now();
+  analysisCache.set(url, {
+    data,
+    timestamp: now,
+    expiresAt: now + CACHE_EXPIRY_MS
+  });
+  console.log('Verible: Cached analysis for:', url);
+}
+
+function getCachedAnalysis(url: string): { data: any; timestamp: number } | null {
+  const cached = analysisCache.get(url);
+  if (!cached) {
+    return null;
   }
+  
+  const now = Date.now();
+  if (now > cached.expiresAt) {
+    analysisCache.delete(url);
+    console.log('Verible: Cache expired for:', url);
+    return null;
+  }
+  
+  return cached;
+}
+
+function clearExpiredCache() {
+  const now = Date.now();
+  for (const [url, cached] of analysisCache.entries()) {
+    if (now > cached.expiresAt) {
+      analysisCache.delete(url);
+    }
+  }
+}
+
+// Clean expired cache every minute
+setInterval(clearExpiredCache, 60 * 1000);
+
+function detectMarketplace(): string | null {
+  const hostname = window.location.hostname.toLowerCase();
+  
+  // Only detect supported marketplaces
   if (hostname.includes('jiji.ng')) {
     return 'jiji';
-  }
-  if (hostname.includes('craigslist.org')) {
-    return 'craigslist';
-  }
-  if (hostname.includes('offerup.com')) {
-    return 'offerup';
   }
   if (hostname.includes('ebay.com')) {
     return 'ebay';
   }
   if (hostname.includes('etsy.com')) {
-    console.log('Verible: Detected Etsy platform');
     return 'etsy';
   }
   if (hostname.includes('jumia.com')) {
@@ -192,14 +293,8 @@ function detectMarketplace(): string | null {
 
 function extractSellerInfo(platform: string): any | null {
   switch (platform) {
-    case 'facebook':
-      return extractFacebookSellerInfo();
     case 'jiji':
       return extractJijiSellerInfo();
-    case 'craigslist':
-      return extractCraigslistSellerInfo();
-    case 'offerup':
-      return extractOfferupSellerInfo();
     case 'ebay':
       return extractEbaySellerInfo();
     case 'etsy':
@@ -213,26 +308,6 @@ function extractSellerInfo(platform: string): any | null {
     default:
       return null;
   }
-}
-
-function extractFacebookSellerInfo() {
-  // Facebook Marketplace seller extraction
-  const sellerNameEl = document.querySelector('[data-testid="marketplace-seller-profile-link"]') || 
-                      document.querySelector('a[href*="/marketplace/profile/"]');
-  const priceEl = document.querySelector('[data-testid="marketplace-listing-price"]') ||
-                  document.querySelector('[data-testid="marketplace-listing-price-value"]');
-  const locationEl = document.querySelector('[data-testid="marketplace-listing-location"]');
-  const descriptionEl = document.querySelector('[data-testid="marketplace-listing-description"]');
-  
-  if (!sellerNameEl) return null;
-  
-  return {
-    name: sellerNameEl.textContent?.trim(),
-    price: priceEl?.textContent?.trim(),
-    location: locationEl?.textContent?.trim(),
-    description: descriptionEl?.textContent?.trim(),
-    platform: 'Facebook Marketplace'
-  };
 }
 
 function extractJijiSellerInfo() {
@@ -254,47 +329,6 @@ function extractJijiSellerInfo() {
     location: locationEl?.textContent?.trim(),
     description: descriptionEl?.textContent?.trim(),
     platform: 'Jiji.ng'
-  };
-}
-
-function extractCraigslistSellerInfo() {
-  // Craigslist seller extraction
-  const sellerNameEl = document.querySelector('.reply-info') || 
-                      document.querySelector('.contact-name');
-  const priceEl = document.querySelector('.price') || 
-                 document.querySelector('.amount');
-  const locationEl = document.querySelector('.postingtitletext') || 
-                    document.querySelector('.postinglocation');
-  const descriptionEl = document.querySelector('.postingbody');
-  
-  return {
-    name: sellerNameEl?.textContent?.trim() || 'Anonymous',
-    price: priceEl?.textContent?.trim(),
-    location: locationEl?.textContent?.trim(),
-    description: descriptionEl?.textContent?.trim(),
-    platform: 'Craigslist'
-  };
-}
-
-function extractOfferupSellerInfo() {
-  // OfferUp seller extraction
-  const sellerNameEl = document.querySelector('[data-testid="seller-name"]') || 
-                      document.querySelector('.seller-name');
-  const priceEl = document.querySelector('[data-testid="item-price"]') || 
-                 document.querySelector('.price');
-  const locationEl = document.querySelector('[data-testid="item-location"]') || 
-                    document.querySelector('.location');
-  const descriptionEl = document.querySelector('[data-testid="item-description"]') || 
-                       document.querySelector('.description');
-  
-  if (!sellerNameEl) return null;
-  
-  return {
-    name: sellerNameEl.textContent?.trim(),
-    price: priceEl?.textContent?.trim(),
-    location: locationEl?.textContent?.trim(),
-    description: descriptionEl?.textContent?.trim(),
-    platform: 'OfferUp'
   };
 }
 
@@ -472,8 +506,10 @@ async function injectTrustOverlay(sellerInfo: any, platform: string) {
 function createTrustOverlayHTML(sellerInfo: any, analysisData?: any): string {
   // Use real analysis data if available, otherwise show loading
   const pulseScore = analysisData?.score || analysisData?.pulseScore || null;
-  const riskLevel = analysisData?.riskLevel || (pulseScore ? (pulseScore >= 75 ? 'Trusted' : pulseScore >= 45 ? 'Uncertain' : 'Avoid') : null);
-  const confidence = analysisData?.confidence || (pulseScore ? 'High' : null);
+  // Use backend's riskLevel if available, otherwise calculate it (fallback)
+  const riskLevel = analysisData?.riskLevel || 
+                   (pulseScore ? (pulseScore >= 75 ? 'Trusted' : pulseScore >= 45 ? 'Uncertain' : 'Avoid') : null);
+  const confidence = analysisData?.confidence || analysisData?.confidenceLevel || (pulseScore ? 'High' : null);
   
   const scoreColor = pulseScore ? (pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444') : '#6b7280';
   const badgeColor = riskLevel ? (riskLevel === 'Trusted' ? '#D1FAE5' : riskLevel === 'Uncertain' ? '#FEF3C7' : '#FEE2E2') : '#f3f4f6';
@@ -589,56 +625,133 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
     badgeColor = '#EF4444';
     borderColor = '#EF4444';
   } else if (scoreData) {
-    // Success state with score
-    const pulseScore = scoreData.pulseScore || 0;
-    const confidenceLevel = scoreData.confidenceLevel || 'Unknown';
-    const recommendations = scoreData.recommendations || [];
-    const riskFactors = scoreData.riskFactors || [];
+    // Check if we have marketplace data but no score
+    const hasMarketplaceData = scoreData.hasMarketplaceData || 
+                              (scoreData.marketplaceData && (
+                                scoreData.marketplaceData.avgRating > 0 ||
+                                scoreData.marketplaceData.totalReviews > 0 ||
+                                scoreData.marketplaceData.followers > 0 ||
+                                scoreData.marketplaceData.successfulSales > 0 ||
+                                scoreData.sellerMetrics?.itemsSold > 0
+                              ));
     
-    // Determine color based on score
-    if (pulseScore >= 75) {
-      badgeColor = '#10B981'; // Green
-      borderColor = '#10B981';
-    } else if (pulseScore >= 45) {
-      badgeColor = '#F59E0B'; // Amber
-      borderColor = '#F59E0B';
-    } else {
-      badgeColor = '#EF4444'; // Red
-      borderColor = '#EF4444';
-    }
+    const pulseScore = scoreData.pulseScore;
+    const scoringStatus = scoreData.scoringStatus;
     
-    // Get intelligent message
-    let credibilityMessage = '';
-    if (recommendations.length > 0) {
-      const topRecommendation = recommendations[0];
-      credibilityMessage = topRecommendation.message || 'Seller analysis available';
-    } else if (pulseScore >= 75) {
-      credibilityMessage = 'Highly trustworthy seller';
-    } else if (pulseScore >= 45) {
-      credibilityMessage = 'Moderate trust level';
-    } else {
-      credibilityMessage = 'Low trust score - proceed with caution';
-    }
-    
-    // Risk indicator
-    const riskIndicator = riskFactors.length > 0 ? `⚠️ ${riskFactors.length} risk${riskFactors.length > 1 ? 's' : ''}` : '';
-    
-    badgeContent = `
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <div style="width: 32px; height: 32px; background: ${badgeColor}; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 16px;">${Math.round(pulseScore)}</div>
-          <div style="flex: 1; display: flex; flex-direction: column; gap: 2px;">
-            <div style="display: flex; align-items: center; gap: 6px;">
-              <span style="font-weight: 700; color: #1f2937; font-size: 16px;">Trust Score: ${Math.round(pulseScore)}/100</span>
-              <span style="padding: 2px 6px; background: ${badgeColor}20; color: ${badgeColor}; border-radius: 4px; font-size: 11px; font-weight: 600;">${confidenceLevel}</span>
+    if (pulseScore === null || pulseScore === undefined || scoringStatus === 'insufficient_data') {
+      // Insufficient data for scoring, but marketplace data available
+      if (hasMarketplaceData) {
+        const marketplaceData = scoreData.marketplaceData || {};
+        const sellerMetrics = scoreData.sellerMetrics || {};
+        const platform = scoreData.platform || 'marketplace';
+        const platformName = platform.charAt(0).toUpperCase() + platform.slice(1);
+        
+        // Build marketplace metrics display
+        const metrics = [];
+        if (marketplaceData.avgRating > 0) {
+          metrics.push(`⭐ ${marketplaceData.avgRating.toFixed(1)} rating`);
+        }
+        if (sellerMetrics.positiveFeedbackPercent > 0) {
+          metrics.push(`👍 ${sellerMetrics.positiveFeedbackPercent}% positive`);
+        }
+        if (marketplaceData.successfulSales > 0 || sellerMetrics.itemsSold > 0) {
+          const sales = marketplaceData.successfulSales || sellerMetrics.itemsSold || 0;
+          const salesText = sales >= 1000000 ? `${(sales / 1000000).toFixed(1)}M` : 
+                          sales >= 1000 ? `${(sales / 1000).toFixed(1)}K` : sales;
+          metrics.push(`📦 ${salesText} sales`);
+        }
+        if (marketplaceData.followers > 0) {
+          const followers = marketplaceData.followers;
+          const followersText = followers >= 1000000 ? `${(followers / 1000000).toFixed(1)}M` : 
+                               followers >= 1000 ? `${(followers / 1000).toFixed(1)}K` : followers;
+          metrics.push(`👥 ${followersText} followers`);
+        }
+        if (marketplaceData.verificationStatus && marketplaceData.verificationStatus !== 'unverified') {
+          metrics.push(`✓ ${marketplaceData.verificationStatus}`);
+        }
+        
+        badgeColor = '#6B7280';
+        borderColor = '#6B7280';
+        
+        badgeContent = `
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div style="width: 32px; height: 32px; background: #6B7280; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 18px;">?</div>
+              <div style="flex: 1; display: flex; flex-direction: column; gap: 2px;">
+                <span style="font-weight: 700; color: #1f2937; font-size: 16px;">${platformName} Seller Data</span>
+                <span style="font-size: 12px; color: #6b7280;">Score unavailable - marketplace metrics shown</span>
+              </div>
             </div>
-            <span style="font-size: 13px; color: #6b7280;">${credibilityMessage}</span>
-            ${riskIndicator ? `<span style="font-size: 12px; color: #EF4444; font-weight: 500;">${riskIndicator}</span>` : ''}
+            ${metrics.length > 0 ? `
+              <div style="display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #f9fafb; border-radius: 6px;">
+                ${metrics.map(m => `<span style="font-size: 11px; color: #374151; padding: 2px 6px; background: white; border-radius: 4px;">${m}</span>`).join('')}
+              </div>
+            ` : ''}
+            <div style="font-size: 12px; color: #6b7280; font-style: italic;">Open extension to view ${platformName} metrics</div>
           </div>
+        `;
+      } else {
+        // No score and no marketplace data
+        badgeColor = '#6B7280';
+        borderColor = '#6B7280';
+        badgeContent = `
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 20px; height: 20px; background: #6B7280; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">?</div>
+            <span style="font-weight: 600; color: #1f2937; font-size: 14px;">Insufficient data for analysis</span>
+          </div>
+        `;
+      }
+    } else {
+      // Success state with score
+      const confidenceLevel = scoreData.confidenceLevel || 'Unknown';
+      const recommendations = scoreData.recommendations || [];
+      const riskFactors = scoreData.riskFactors || [];
+      
+      // Determine color based on score
+      if (pulseScore >= 75) {
+        badgeColor = '#10B981'; // Green
+        borderColor = '#10B981';
+      } else if (pulseScore >= 45) {
+        badgeColor = '#F59E0B'; // Amber
+        borderColor = '#F59E0B';
+      } else {
+        badgeColor = '#EF4444'; // Red
+        borderColor = '#EF4444';
+      }
+      
+      // Get intelligent message
+      let credibilityMessage = '';
+      if (recommendations.length > 0) {
+        const topRecommendation = recommendations[0];
+        credibilityMessage = topRecommendation.message || 'Seller analysis available';
+      } else if (pulseScore >= 75) {
+        credibilityMessage = 'Highly trustworthy seller';
+      } else if (pulseScore >= 45) {
+        credibilityMessage = 'Moderate trust level';
+      } else {
+        credibilityMessage = 'Low trust score - proceed with caution';
+      }
+      
+      // Risk indicator
+      const riskIndicator = riskFactors.length > 0 ? `⚠️ ${riskFactors.length} risk${riskFactors.length > 1 ? 's' : ''}` : '';
+      
+      badgeContent = `
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 32px; height: 32px; background: ${badgeColor}; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 16px;">${Math.round(pulseScore)}</div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 2px;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-weight: 700; color: #1f2937; font-size: 16px;">Trust Score: ${Math.round(pulseScore)}/100</span>
+                <span style="padding: 2px 6px; background: ${badgeColor}20; color: ${badgeColor}; border-radius: 4px; font-size: 11px; font-weight: 600;">${confidenceLevel}</span>
+              </div>
+              <span style="font-size: 13px; color: #6b7280;">${credibilityMessage}</span>
+              ${riskIndicator ? `<span style="font-size: 12px; color: #EF4444; font-weight: 500;">${riskIndicator}</span>` : ''}
+            </div>
+          </div>
+          <div style="font-size: 12px; color: #6b7280; font-style: italic;">Open extension to view detailed analysis</div>
         </div>
-        <div style="font-size: 12px; color: #6b7280; font-style: italic;">Click to view detailed analysis</div>
-      </div>
-    `;
+      `;
+    }
   } else {
     // Default/fallback - show loading state instead of "Hello"
     badgeContent = `
@@ -651,7 +764,7 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
   
   badge.innerHTML = badgeContent;
   
-  // Style the badge
+  // Style the badge with improved positioning and responsiveness
   badge.style.cssText = `
     position: fixed;
     top: 20px;
@@ -663,12 +776,36 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
     padding: ${scoreData ? '16px' : '12px 16px'};
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
     cursor: pointer;
-    transition: all 0.3s ease;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    max-width: 350px;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    max-width: min(350px, calc(100vw - 40px));
     opacity: 0;
     transform: translateY(-10px);
+    animation: slideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   `;
+  
+  // Add animation styles
+  if (!document.getElementById('verible-badge-styles')) {
+    const style = document.createElement('style');
+    style.id = 'verible-badge-styles';
+    style.textContent = `
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes loading {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
   
   // Add loading animation if needed
   if (isLoading) {
@@ -693,9 +830,9 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
     badge.style.boxShadow = '0 10px 25px rgba(0, 0, 0, 0.15)';
   });
   
-  // Click handler - show instruction and remove badge
+  // Click handler - store data and remove badge (user opens extension manually)
   badge.addEventListener('click', async () => {
-    console.log('Verible badge clicked');
+    console.log('Verible badge clicked - storing data for extension');
     const runtime = getRuntimeAPI();
     
     // Store the profile URL for the extension to use
@@ -710,35 +847,49 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
       }
     }
     
-    // Show instruction message
-    badge.style.background = '#f0f9ff';
-    badge.style.borderColor = '#667eea';
-    badge.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 8px;">
-        <div style="width: 20px; height: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">V</div>
-        <span style="font-weight: 600; color: #1f2937; font-size: 14px;">Click extension icon →</span>
-      </div>
-    `;
+    // Clear auto-dismiss timer
+    const timer = (badge as any)._autoDismissTimer;
+    if (timer) {
+      clearTimeout(timer);
+    }
     
-    // Remove badge after 3 seconds
+    // Remove badge immediately after click
+    badge.style.opacity = '0';
+    badge.style.transform = 'translateY(-10px)';
+    badge.style.transition = 'all 0.3s ease';
     setTimeout(() => {
+      if (badge.parentNode) {
+        badge.remove();
+      }
+    }, 300);
+  });
+  
+  // Auto-dismiss badge after 7 seconds (store timer on badge for cleanup)
+  const autoDismissTimer = setTimeout(() => {
+    if (badge.parentNode) {
       badge.style.opacity = '0';
       badge.style.transform = 'translateY(-10px)';
       badge.style.transition = 'all 0.3s ease';
       setTimeout(() => {
-        badge.remove();
+        if (badge.parentNode) {
+          badge.remove();
+        }
       }, 300);
-    }, 3000);
-  });
+    }
+  }, 7000); // 7 seconds
+  
+  // Store timer on badge element so we can clear it if badge is removed early
+  (badge as any)._autoDismissTimer = autoDismissTimer;
   
   // Add to page
   document.body.appendChild(badge);
   
-  // Animate in
-  setTimeout(() => {
+  // OPTIMIZATION: Show immediately (removed 100ms delay for faster display)
+  // Use requestAnimationFrame for smooth rendering without blocking
+  requestAnimationFrame(() => {
     badge.style.opacity = '1';
     badge.style.transform = 'translateY(0)';
-  }, 100);
+  });
   
   console.log('Verible badge displayed on page');
 }
@@ -747,6 +898,12 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
 function removeVeribleBadge() {
   const existingBadge = document.getElementById('verible-page-badge');
   if (existingBadge) {
+    // Clear auto-dismiss timer if it exists
+    const timer = (existingBadge as any)._autoDismissTimer;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    
     existingBadge.style.opacity = '0';
     existingBadge.style.transform = 'translateY(-10px)';
     setTimeout(() => {

@@ -482,6 +482,11 @@
   border-radius: 6px;
 }
 
+.report-score.very-high {
+  background: #a7f3d0;
+  color: #064e3b;
+}
+
 .report-score.high {
   background: #d1fae5;
   color: #065f46;
@@ -650,6 +655,10 @@
   margin-bottom: 2px;
 }
 
+.stat-value.very-high {
+  color: #047857;
+}
+
 .stat-value.high {
   color: #10b981;
 }
@@ -759,6 +768,10 @@
   font-size: 16px;
   font-weight: 700;
   color: white;
+}
+
+.trust-score-badge.very-high {
+  background: linear-gradient(135deg, #047857 0%, #065f46 100%);
 }
 
 .trust-score-badge.high {
@@ -889,6 +902,10 @@
   color: white;
 }
 
+.score-badge.very-high {
+  background: linear-gradient(135deg, #047857 0%, #065f46 100%);
+}
+
 .score-badge.high {
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
 }
@@ -961,6 +978,11 @@
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 6px;
+}
+
+.history-score.very-high {
+  color: #047857;
+  background: #a7f3d0;
 }
 
 .history-score.high {
@@ -1596,6 +1618,11 @@
   border-radius: 6px;
 }
 
+.extraction-score.very-high {
+  background: #a7f3d0;
+  color: #064e3b;
+}
+
 .extraction-score.high {
   background: #d1fae5;
   color: #065f46;
@@ -1622,6 +1649,10 @@
   padding: 4px 10px;
   border-radius: 8px;
   color: white;
+}
+
+.activity-score.very-high {
+  background: linear-gradient(135deg, #047857 0%, #065f46 100%);
 }
 
 .activity-score.high {
@@ -3982,6 +4013,11 @@
   font-weight: 600;
 }
 
+.pulse-score-badge.very-high {
+  background: #a7f3d0;
+  color: #064e3b;
+}
+
 .pulse-score-badge.high {
   background: #d1fae5;
   color: #065f46;
@@ -4172,6 +4208,11 @@
   border-radius: 12px;
   background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
   color: #1f2937;
+}
+
+.pulse-badge.very-high {
+  background: linear-gradient(135deg, #a7f3d0 0%, #6ee7b7 100%);
+  color: #064e3b;
 }
 
 .pulse-badge.high {
@@ -4992,6 +5033,10 @@
   color: #1f2937;
   margin-bottom: 12px;
   letter-spacing: -2px;
+}
+
+.trust-score-value-large.very-high {
+  color: #047857;
 }
 
 .trust-score-value-large.high {

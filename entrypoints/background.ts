@@ -169,9 +169,10 @@ export default defineBackground(() => {
 
   // Helper function to get badge color based on pulse score
   function getBadgeColor(pulseScore: number): string {
-    if (pulseScore >= 75) return '#10B981'; // Green (Trustpilot green)
-    if (pulseScore >= 45) return '#F59E0B'; // Amber (Trustpilot amber)
-    return '#EF4444'; // Red (Trustpilot red)
+    if (pulseScore >= 90) return '#047857'; // Dark Green (Very High)
+    if (pulseScore >= 75) return '#10B981'; // Green (High)
+    if (pulseScore >= 45) return '#F59E0B'; // Amber (Medium)
+    return '#EF4444'; // Red (Low)
   }
 
   // Helper function to get badge text color
@@ -330,20 +331,8 @@ export default defineBackground(() => {
           return true; // Keep channel open for async response
 
         case 'OPEN_EXTENSION_FROM_BADGE':
-          // Store the profile URL for popup to use
-          if (message.data && message.data.profileUrl) {
-            storage.setItem('local:pendingSellerAnalysis', {
-              profileUrl: message.data.profileUrl
-            }).then(() => {
-              return storage.setItem('local:openSellerAnalysis', true);
-            }).then(() => {
-              console.log('Stored seller data for popup');
-              if (sendResponse) sendResponse({ success: true });
-            }).catch((error: any) => {
-              console.error('Error storing seller data:', error);
-              if (sendResponse) sendResponse({ success: false, error: 'Failed to store data' });
-            });
-          }
+          // Store the profile URL and attempt to open extension popup
+          handleOpenExtensionFromBadge(message.data, sendResponse);
           return true;
 
         case 'GET_CURRENT_SELLER':
@@ -451,8 +440,140 @@ export default defineBackground(() => {
     }
   }
 
+  // Handle opening extension popup from badge click
+  async function handleOpenExtensionFromBadge(data: { profileUrl: string; scoreData?: any }, sendResponse?: Function) {
+    try {
+      if (!data || !data.profileUrl) {
+        console.error('No profile URL provided for opening extension');
+        if (sendResponse) sendResponse({ success: false, error: 'No profile URL provided' });
+        return;
+      }
+
+      const profileUrl = data.profileUrl;
+      const scoreDataFromBadge = data.scoreData;
+      console.log('Opening extension from badge click for:', profileUrl);
+
+      // Prepare seller data for storage
+      // Use scoreData from badge if available, otherwise get from currentSellerData or storage
+      let sellerData: any = null;
+      
+      if (scoreDataFromBadge) {
+        // Use the score data passed from badge click
+        sellerData = {
+          profileUrl,
+          pulseScore: scoreDataFromBadge.pulseScore,
+          riskLevel: scoreDataFromBadge.riskLevel,
+          confidenceLevel: scoreDataFromBadge.confidenceLevel,
+          recommendations: scoreDataFromBadge.recommendations || [],
+          riskFactors: scoreDataFromBadge.riskFactors || [],
+          profileData: scoreDataFromBadge.profileData,
+          marketplaceData: scoreDataFromBadge.marketplaceData,
+          sellerMetrics: scoreDataFromBadge.sellerMetrics,
+          platform: scoreDataFromBadge.platform,
+          scoringStatus: scoreDataFromBadge.scoringStatus
+        };
+      } else {
+        // Fallback: get from current seller data
+        sellerData = currentSellerData;
+        
+        // If still no data, try storage
+        if (!sellerData || sellerData.profileUrl !== profileUrl) {
+          try {
+            const stored = await storage.getItem<any>('local:pendingSellerAnalysis');
+            if (stored && stored.profileUrl === profileUrl) {
+              sellerData = stored;
+            }
+          } catch (error) {
+            console.warn('Could not retrieve stored seller data:', error);
+          }
+        }
+        
+        // Final fallback: just profile URL
+        if (!sellerData || sellerData.profileUrl !== profileUrl) {
+          sellerData = { profileUrl };
+        }
+      }
+
+      // Store/update the seller data for popup to use
+      await storage.setItem('local:pendingSellerAnalysis', sellerData);
+      await storage.setItem('local:openSellerAnalysis', true);
+      
+      console.log('Stored seller data for popup:', sellerData);
+
+      // Attempt to open the extension popup programmatically
+      // Note: This may not work in all browsers/contexts due to security restrictions
+      const action = getActionAPI();
+      let popupOpened = false;
+      
+      if (action && action.openPopup) {
+        try {
+          // Try to open popup - this works in some browsers when called in response to user action
+          await action.openPopup();
+          console.log('Extension popup opened successfully');
+          popupOpened = true;
+        } catch (popupError: any) {
+          console.log('Could not open popup programmatically (this is normal in many browsers):', popupError?.message);
+          // Try alternative: open popup HTML in a new window
+          // Note: This requires 'windows' permission in manifest
+          try {
+            if (browserAPI && browserAPI.runtime && browserAPI.windows) {
+              // Get popup URL - WXT builds popup/index.html to popup.html
+              const popupUrl = browserAPI.runtime.getURL('popup.html');
+              console.log('Attempting to open popup at:', popupUrl);
+              
+              // Try to open in a new popup window
+              if (browserAPI.windows.create) {
+                const window = await browserAPI.windows.create({
+                  url: popupUrl,
+                  type: 'popup',
+                  width: 400,
+                  height: 600,
+                  focused: true
+                });
+                if (window && window.id) {
+                  console.log('Extension opened in new popup window');
+                  popupOpened = true;
+                }
+              }
+            }
+          } catch (windowError: any) {
+            console.log('Could not open extension in new window:', windowError?.message);
+            // This is expected if windows permission is not available
+          }
+        }
+      }
+
+      if (popupOpened) {
+        if (sendResponse) sendResponse({ success: true, popupOpened: true });
+        return;
+      }
+
+      // Fallback: Popup couldn't be opened programmatically
+      // The data is stored, so when user clicks extension icon, it will show the analysis
+      console.log('Popup cannot be opened programmatically - data stored for manual open');
+      if (sendResponse) sendResponse({ success: true, popupOpened: false, message: 'Click the extension icon to view details' });
+    } catch (error: any) {
+      console.error('Error opening extension from badge:', error);
+      if (sendResponse) sendResponse({ success: false, error: error?.message || 'Failed to open extension' });
+    }
+  }
+
   // Handle seller page detection and update badge with API call (with improved error handling)
   async function handleSellerPageDetection(data: { profileUrl: string; platform?: string }, sendResponse?: Function) {
+    const responded = { value: false }; // Track if we've sent a response
+    
+    // Helper to ensure response is only sent once
+    const safeSendResponse = (response: any) => {
+      if (sendResponse && !responded.value) {
+        responded.value = true;
+        try {
+          sendResponse(response);
+        } catch (error) {
+          console.error('Error sending response:', error);
+        }
+      }
+    };
+    
     try {
       const { profileUrl } = data;
       
@@ -461,7 +582,7 @@ export default defineBackground(() => {
       if (!profileUrl) {
         console.error('No profile URL provided');
         clearBadge();
-        if (sendResponse) sendResponse({ success: false, error: 'No profile URL provided' });
+        safeSendResponse({ success: false, error: 'No profile URL provided' });
         return;
       }
 
@@ -511,7 +632,7 @@ export default defineBackground(() => {
             const color = riskLevel === 'Trusted' ? '#10B981' : 
                          riskLevel === 'Uncertain' ? '#F59E0B' : 
                          riskLevel === 'Avoid' ? '#EF4444' :
-                         (pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444');
+                         (pulseScore >= 90 ? '#047857' : pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444');
             
             // OPTIMIZATION: Update badge and storage in parallel
             const badgeUpdate = action.setBadgeText({ text: scoreText }).then(() => 
@@ -537,23 +658,21 @@ export default defineBackground(() => {
             // Wait for both to complete, then send response
             await Promise.all([badgeUpdate, storageUpdate]);
 
-            if (sendResponse) {
-              sendResponse({
-                success: true,
-                data: {
-                  pulseScore,
-                  riskLevel,
-                  confidenceLevel,
-                  recommendations,
-                  riskFactors,
-                  profileData,
-                  marketplaceData,
-                  sellerMetrics,
-                  platform,
-                  scoringStatus
-                }
-              });
-            }
+            safeSendResponse({
+              success: true,
+              data: {
+                pulseScore,
+                riskLevel,
+                confidenceLevel,
+                recommendations,
+                riskFactors,
+                profileData,
+                marketplaceData,
+                sellerMetrics,
+                platform,
+                scoringStatus
+              }
+            });
             return;
           } else if ((scoringStatus === 'insufficient_data' || pulseScore === undefined) && hasMarketplaceData) {
             // Handle insufficient data with marketplace metrics
@@ -582,24 +701,22 @@ export default defineBackground(() => {
             });
             await storage.setItem('local:openSellerAnalysis', true);
 
-            if (sendResponse) {
-              sendResponse({
-                success: true,
-                data: {
-                  pulseScore: null,
-                  riskLevel: null,
-                  confidenceLevel: null,
-                  recommendations,
-                  riskFactors: [],
-                  profileData,
-                  marketplaceData,
-                  sellerMetrics,
-                  platform,
-                  scoringStatus: 'insufficient_data',
-                  hasMarketplaceData: true
-                }
-              });
-            }
+            safeSendResponse({
+              success: true,
+              data: {
+                pulseScore: null,
+                riskLevel: null,
+                confidenceLevel: null,
+                recommendations,
+                riskFactors: [],
+                profileData,
+                marketplaceData,
+                sellerMetrics,
+                platform,
+                scoringStatus: 'insufficient_data',
+                hasMarketplaceData: true
+              }
+            });
             return;
           }
         }
@@ -670,7 +787,7 @@ export default defineBackground(() => {
             const color = riskLevel === 'Trusted' ? '#10B981' : 
                          riskLevel === 'Uncertain' ? '#F59E0B' : 
                          riskLevel === 'Avoid' ? '#EF4444' :
-                         (pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444');
+                         (pulseScore >= 90 ? '#047857' : pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444');
             
             // Update badge and storage in parallel for faster response
             const badgeUpdate = action.setBadgeText({ text: scoreText })
@@ -695,23 +812,21 @@ export default defineBackground(() => {
             // Wait for both to complete
             await Promise.all([badgeUpdate, storageUpdate]);
 
-            if (sendResponse) {
-              sendResponse({
-                success: true,
-                data: {
-                  pulseScore,
-                  riskLevel,
-                  confidenceLevel,
-                  recommendations,
-                  riskFactors,
-                  profileData,
-                  marketplaceData,
-                  sellerMetrics,
-                  platform,
-                  scoringStatus
-                }
-              });
-            }
+            safeSendResponse({
+              success: true,
+              data: {
+                pulseScore,
+                riskLevel,
+                confidenceLevel,
+                recommendations,
+                riskFactors,
+                profileData,
+                marketplaceData,
+                sellerMetrics,
+                platform,
+                scoringStatus
+              }
+            });
           } else if (hasInsufficientData && hasMarketplaceData) {
             // Insufficient data for scoring, but marketplace data available
             console.log('Insufficient data for scoring, but marketplace data available');
@@ -773,7 +888,7 @@ export default defineBackground(() => {
                 console.error('Error setting N/A badge:', e);
               }
             }
-            if (sendResponse) sendResponse({ success: false, error: 'No score or marketplace data available' });
+            safeSendResponse({ success: false, error: 'No score or marketplace data available' });
           }
         } else {
           console.error('Score API failed:', scoreResponse);
@@ -786,7 +901,7 @@ export default defineBackground(() => {
               console.error('Error setting error badge:', e);
             }
           }
-          if (sendResponse) sendResponse({ success: false, error: errorMessage });
+          safeSendResponse({ success: false, error: errorMessage });
         }
       } catch (error: any) {
         console.error('Error calling score API:', error);
@@ -810,12 +925,12 @@ export default defineBackground(() => {
             console.error('Error setting error badge:', e);
           }
         }
-        if (sendResponse) sendResponse({ success: false, error: userFriendlyError });
+        safeSendResponse({ success: false, error: userFriendlyError });
       }
     } catch (error) {
       console.error('Error handling seller page detection:', error);
       clearBadge();
-      if (sendResponse) sendResponse({ success: false, error: 'Internal error' });
+      safeSendResponse({ success: false, error: 'Internal error' });
     }
   }
 

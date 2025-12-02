@@ -51,7 +51,7 @@
    ```env
    VITE_API_BASE_URL=https://verible-backend.vercel.app
    VITE_APP_NAME=Verible
-   VITE_APP_VERSION=1.0.5
+   VITE_APP_VERSION=1.0.6
    ```
 
 4. **Generate TypeScript types from API**
@@ -311,7 +311,7 @@ This project is private and proprietary.
 
 ## 📊 Version History
 
-- **1.0.5** - Current version
+- **1.0.6** - Current version
   - Authentication system
   - Dashboard implementation
   - Badge notifications

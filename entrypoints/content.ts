@@ -34,6 +34,11 @@ const CACHE_EXPIRY_MS = 5 * 60 * 1000;
 // Debounce timer for URL changes
 let urlChangeDebounceTimer: number | null = null;
 let lastProcessedUrl = '';
+// Track initialization state to prevent race conditions
+let isInitializing = false;
+let pendingRequests = new Map<string, Promise<any>>();
+let lastInitializationTime = 0;
+const MIN_INITIALIZATION_INTERVAL = 300; // Minimum 300ms between initializations
 
 export default defineContentScript({
   matches: [
@@ -88,40 +93,116 @@ function setupUrlChangeMonitoring() {
       urlChangeDebounceTimer = window.setTimeout(() => {
         if (currentUrl !== lastProcessedUrl) {
           lastProcessedUrl = currentUrl;
+          // Clear any pending initialization flag when URL actually changes
+          isInitializing = false;
           initializeVerible();
         }
-      }, 200); // 200ms debounce (reduced from 500ms for faster detection)
+      }, 300); // 300ms debounce for better reliability
     }
   };
   
   // Listen for popstate (back/forward navigation)
   window.addEventListener('popstate', checkUrlChange);
   
-  // Monitor DOM changes that might indicate navigation
-  const observer = new MutationObserver(checkUrlChange);
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
+  // Monitor DOM changes that might indicate navigation (but be more selective)
+  let mutationObserver: MutationObserver | null = null;
+  
+  const setupMutationObserver = () => {
+    if (mutationObserver) {
+      mutationObserver.disconnect();
+    }
+    
+    mutationObserver = new MutationObserver((mutations) => {
+      // Only check URL if we see significant DOM changes (new page content)
+      let significantChange = false;
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+          // Check if added nodes suggest a new page
+          for (let i = 0; i < mutation.addedNodes.length; i++) {
+            const node = mutation.addedNodes[i] as HTMLElement;
+            if (node && (node.nodeType === Node.ELEMENT_NODE) && 
+                (node.tagName === 'MAIN' || node.tagName === 'ARTICLE' || 
+                 node.classList?.contains('page-content') || 
+                 node.classList?.contains('seller-profile'))) {
+              significantChange = true;
+              break;
+            }
+          }
+          if (significantChange) break;
+        }
+      }
+      
+      if (significantChange) {
+        checkUrlChange();
+      }
+    });
+    
+    if (document.body) {
+      mutationObserver.observe(document.body, {
+        childList: true,
+        subtree: false // Only observe direct children, not all descendants
+      });
+    }
+  };
+  
+  // Setup observer when DOM is ready
+  if (document.body) {
+    setupMutationObserver();
+  } else {
+    // Wait for body if not ready
+    const bodyObserver = new MutationObserver(() => {
+      if (document.body) {
+        setupMutationObserver();
+        bodyObserver.disconnect();
+      }
+    });
+    bodyObserver.observe(document.documentElement, {
+      childList: true
+    });
+  }
   
   // Also check periodically (fallback for SPAs that don't trigger events)
   setInterval(checkUrlChange, 1000); // Reduced from 2000ms to 1000ms for faster detection
 }
 
 function initializeVerible() {
-  // Detect which marketplace we're on
-  const platform = detectMarketplace();
-  if (!platform) {
-    console.log('Verible: No marketplace detected for:', window.location.href);
-    removeVeribleBadge();
+  const currentUrl = window.location.href;
+  const now = Date.now();
+  
+  // Prevent rapid successive calls (rate limiting)
+  if (now - lastInitializationTime < MIN_INITIALIZATION_INTERVAL && currentUrl === lastProcessedUrl) {
+    console.log('Verible: Skipping initialization - too soon after last call for same URL');
     return;
   }
-
-  console.log(`Verible: Detected ${platform} marketplace on:`, window.location.href);
   
-  // Check if current page is a seller profile page
-  const currentUrl = window.location.href;
-  const currentPath = window.location.pathname;
+  // Prevent multiple simultaneous initializations
+  if (isInitializing) {
+    console.log('Verible: Initialization already in progress, skipping duplicate call');
+    return;
+  }
+  
+  // Check if there's already a pending request for this URL
+  if (pendingRequests.has(currentUrl)) {
+    console.log('Verible: Request already pending for this URL:', currentUrl);
+    return;
+  }
+  
+  isInitializing = true;
+  lastInitializationTime = now;
+  
+  try {
+    // Detect which marketplace we're on
+    const platform = detectMarketplace();
+    if (!platform) {
+      console.log('Verible: No marketplace detected for:', window.location.href);
+      removeVeribleBadge();
+      return;
+    }
+
+    console.log(`Verible: Detected ${platform} marketplace on:`, window.location.href);
+    
+    // Check if current page is a seller profile page
+    const currentPath = window.location.pathname;
   
   // Improved patterns for supported marketplaces only
   const sellerProfilePatterns = [
@@ -170,59 +251,82 @@ function initializeVerible() {
     }
   }
 
-  // Notify background script about seller page detection
-  if (isSellerProfile) {
-    console.log('Verible: Detected seller profile page, notifying background script:', currentUrl);
-    
-    // Always remove existing badge first when navigating to new seller
-    removeVeribleBadge();
-    
-    // Check cache first (fast path)
-    const cached = getCachedAnalysis(currentUrl);
-    if (cached) {
-      console.log('Verible: Using cached analysis result');
-      showVeribleBadge(currentUrl, false, cached.data);
-      return;
-    }
-    
-    // OPTIMIZATION: Start API call immediately, show badge in parallel
-    const runtime = getRuntimeAPI();
-    if (runtime) {
-      // Send message immediately (don't wait for badge to show)
-      const apiCallPromise = runtime.sendMessage({
-        type: 'DETECT_SELLER_PAGE',
-        data: { profileUrl: currentUrl, platform }
-      });
+    // Notify background script about seller page detection
+    if (isSellerProfile) {
+      console.log('Verible: Detected seller profile page, notifying background script:', currentUrl);
       
-      // Show loading badge in parallel (non-blocking)
-      showVeribleBadge(currentUrl, true); // true = loading state
+      // Always remove existing badge first when navigating to new seller
+      removeVeribleBadge();
       
-      // Handle response
-      apiCallPromise
-        .then((response: any) => {
+      // Check cache first (fast path)
+      const cached = getCachedAnalysis(currentUrl);
+      if (cached) {
+        console.log('Verible: Using cached analysis result');
+        showVeribleBadge(currentUrl, false, cached.data);
+        isInitializing = false;
+        return;
+      }
+      
+      // OPTIMIZATION: Start API call immediately, show badge in parallel
+      const runtime = getRuntimeAPI();
+      if (!runtime) {
+        console.error('Verible: Cannot send message - runtime API not available');
+        showVeribleBadge(currentUrl, false, null, 'Extension error');
+        isInitializing = false;
+        return;
+      }
+      
+      // Create a promise to track this request
+      const requestPromise = (async () => {
+        try {
+          // Show loading badge immediately
+          showVeribleBadge(currentUrl, true); // true = loading state
+          
+          // Send message with timeout and retry logic
+          const response = await sendMessageWithRetry(runtime, {
+            type: 'DETECT_SELLER_PAGE',
+            data: { profileUrl: currentUrl, platform }
+          }, 3, 1000); // 3 retries, 1 second delay
+          
           console.log('Verible: Background script response:', response);
+          
           if (response && response.success && response.data) {
             // Cache the result
             cacheAnalysis(currentUrl, response.data);
             // Update badge with actual score and message
             showVeribleBadge(currentUrl, false, response.data);
+            return response;
           } else {
             // Show error state
-            showVeribleBadge(currentUrl, false, null, response?.error || 'Failed to analyze');
+            const errorMsg = response?.error || 'Failed to analyze seller';
+            console.error('Verible: API call failed:', errorMsg);
+            showVeribleBadge(currentUrl, false, null, errorMsg);
+            throw new Error(errorMsg);
           }
-        })
-        .catch((error: any) => {
+        } catch (error: any) {
           console.error('Verible: Error notifying background script:', error);
           showVeribleBadge(currentUrl, false, null, 'Error analyzing seller');
-        });
+          throw error;
+        } finally {
+          // Clean up pending request
+          pendingRequests.delete(currentUrl);
+        }
+      })();
+      
+      // Store the promise to prevent duplicate requests
+      pendingRequests.set(currentUrl, requestPromise);
+      
+      // Don't await - let it run in background
+      requestPromise.catch((error) => {
+        console.error('Verible: Request promise rejected:', error);
+      });
     } else {
-      console.error('Verible: Cannot send message - runtime API not available');
-      showVeribleBadge(currentUrl, false, null, 'Extension error');
+      console.log('Verible: Not a seller profile page:', currentUrl);
+      // Remove badge if it exists
+      removeVeribleBadge();
     }
-  } else {
-    console.log('Verible: Not a seller profile page:', currentUrl);
-    // Remove badge if it exists
-    removeVeribleBadge();
+  } finally {
+    isInitializing = false;
   }
 }
 
@@ -264,6 +368,47 @@ function clearExpiredCache() {
 
 // Clean expired cache every minute
 setInterval(clearExpiredCache, 60 * 1000);
+
+// Helper function to send message with retry logic
+async function sendMessageWithRetry(
+  runtime: any, 
+  message: any, 
+  maxRetries: number = 3, 
+  delayMs: number = 1000
+): Promise<any> {
+  let lastError: any = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Verible: Sending message (attempt ${attempt}/${maxRetries}):`, message.type);
+      
+      // Create a promise with timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Message timeout')), 30000); // 30 second timeout
+      });
+      
+      const messagePromise = runtime.sendMessage(message);
+      const response = await Promise.race([messagePromise, timeoutPromise]);
+      
+      console.log(`Verible: Message sent successfully on attempt ${attempt}`);
+      return response;
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`Verible: Message send failed (attempt ${attempt}/${maxRetries}):`, error?.message || error);
+      
+      // Don't retry if we've exhausted attempts
+      if (attempt < maxRetries) {
+        // Exponential backoff
+        const backoffDelay = delayMs * Math.pow(2, attempt - 1);
+        console.log(`Verible: Retrying in ${backoffDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
+      }
+    }
+  }
+  
+  // All retries failed
+  throw lastError || new Error('Failed to send message after retries');
+}
 
 function detectMarketplace(): string | null {
   const hostname = window.location.hostname.toLowerCase();
@@ -511,7 +656,7 @@ function createTrustOverlayHTML(sellerInfo: any, analysisData?: any): string {
                    (pulseScore ? (pulseScore >= 75 ? 'Trusted' : pulseScore >= 45 ? 'Uncertain' : 'Avoid') : null);
   const confidence = analysisData?.confidence || analysisData?.confidenceLevel || (pulseScore ? 'High' : null);
   
-  const scoreColor = pulseScore ? (pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444') : '#6b7280';
+  const scoreColor = pulseScore ? (pulseScore >= 90 ? '#047857' : pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444') : '#6b7280';
   const badgeColor = riskLevel ? (riskLevel === 'Trusted' ? '#D1FAE5' : riskLevel === 'Uncertain' ? '#FEF3C7' : '#FEE2E2') : '#f3f4f6';
   const badgeTextColor = riskLevel ? (riskLevel === 'Trusted' ? '#065F46' : riskLevel === 'Uncertain' ? '#92400E' : '#991B1B') : '#6b7280';
 
@@ -568,8 +713,21 @@ function createTrustOverlayHTML(sellerInfo: any, analysisData?: any): string {
 
 // Show Verible badge/toast on the page
 function showVeribleBadge(profileUrl: string, isLoading: boolean = false, scoreData: any = null, error: string | null = null) {
-  // Remove existing badge and helper message if present
-  removeVeribleBadge();
+  // Check if badge already exists - if so, update it in place instead of removing/recreating
+  const existingBadge = document.getElementById('verible-page-badge');
+  
+  if (existingBadge) {
+    // Update existing badge in place (preserves any timers, listeners, etc.)
+    console.log('Verible: Updating existing badge in place');
+    updateBadgeInPlace(existingBadge as HTMLElement, profileUrl, isLoading, scoreData, error);
+    return;
+  }
+  
+  // No existing badge - remove helper messages if present
+  const existingHelper = document.getElementById('verible-helper-message');
+  if (existingHelper) {
+    existingHelper.remove();
+  }
   
   // Also remove any old trust overlay that might exist
   const existingOverlay = document.getElementById('verible-trust-overlay');
@@ -587,6 +745,183 @@ function showVeribleBadge(profileUrl: string, isLoading: boolean = false, scoreD
   };
   
   ensureBody();
+}
+
+// Update existing badge in place (preserves badge instance, timers, listeners)
+function updateBadgeInPlace(badge: HTMLElement, profileUrl: string, isLoading: boolean, scoreData: any, error: string | null) {
+  // Reuse the same logic from createBadge to generate content
+  let badgeContent = '';
+  let badgeColor = '#10B981';
+  let borderColor = '#10B981';
+  
+  // Generate content based on state (reuse logic from createBadge)
+  if (isLoading) {
+    badgeContent = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="width: 20px; height: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">V</div>
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <span style="font-weight: 600; color: #1f2937; font-size: 14px;">Analyzing seller...</span>
+          <div style="width: 100px; height: 2px; background: #e5e7eb; border-radius: 1px; overflow: hidden;">
+            <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); animation: loading 1.5s infinite;"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    badgeColor = '#6B7280';
+    borderColor = '#6B7280';
+  } else if (error) {
+    badgeContent = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="width: 20px; height: 20px; background: #EF4444; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">!</div>
+        <span style="font-weight: 600; color: #1f2937; font-size: 14px;">${error}</span>
+      </div>
+    `;
+    badgeColor = '#EF4444';
+    borderColor = '#EF4444';
+  } else if (scoreData) {
+    const pulseScore = scoreData.pulseScore;
+    const scoringStatus = scoreData.scoringStatus;
+    const hasMarketplaceData = scoreData.hasMarketplaceData || 
+                              (scoreData.marketplaceData && (
+                                scoreData.marketplaceData.avgRating > 0 ||
+                                scoreData.marketplaceData.totalReviews > 0 ||
+                                scoreData.marketplaceData.followers > 0 ||
+                                scoreData.marketplaceData.successfulSales > 0 ||
+                                scoreData.sellerMetrics?.itemsSold > 0
+                              ));
+    
+    if (pulseScore === null || pulseScore === undefined || scoringStatus === 'insufficient_data') {
+      if (hasMarketplaceData) {
+        const marketplaceData = scoreData.marketplaceData || {};
+        const sellerMetrics = scoreData.sellerMetrics || {};
+        const platform = scoreData.platform || 'marketplace';
+        const platformName = platform.charAt(0).toUpperCase() + platform.slice(1);
+        
+        const metrics = [];
+        if (marketplaceData.avgRating > 0) {
+          metrics.push(`⭐ ${marketplaceData.avgRating.toFixed(1)} rating`);
+        }
+        if (sellerMetrics.positiveFeedbackPercent > 0) {
+          metrics.push(`👍 ${sellerMetrics.positiveFeedbackPercent}% positive`);
+        }
+        if (marketplaceData.successfulSales > 0 || sellerMetrics.itemsSold > 0) {
+          const sales = marketplaceData.successfulSales || sellerMetrics.itemsSold || 0;
+          const salesText = sales >= 1000000 ? `${(sales / 1000000).toFixed(1)}M` : 
+                          sales >= 1000 ? `${(sales / 1000).toFixed(1)}K` : sales;
+          metrics.push(`📦 ${salesText} sales`);
+        }
+        if (marketplaceData.followers > 0) {
+          const followers = marketplaceData.followers;
+          const followersText = followers >= 1000000 ? `${(followers / 1000000).toFixed(1)}M` : 
+                               followers >= 1000 ? `${(followers / 1000).toFixed(1)}K` : followers;
+          metrics.push(`👥 ${followersText} followers`);
+        }
+        if (marketplaceData.verificationStatus && marketplaceData.verificationStatus !== 'unverified') {
+          metrics.push(`✓ ${marketplaceData.verificationStatus}`);
+        }
+        
+        badgeColor = '#6B7280';
+        borderColor = '#6B7280';
+        
+        badgeContent = `
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div style="width: 32px; height: 32px; background: #6B7280; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 18px;">?</div>
+              <div style="flex: 1; display: flex; flex-direction: column; gap: 2px;">
+                <span style="font-weight: 700; color: #1f2937; font-size: 16px;">${platformName} Seller Data</span>
+                <span style="font-size: 12px; color: #6b7280;">Score unavailable - marketplace metrics shown</span>
+              </div>
+            </div>
+            ${metrics.length > 0 ? `
+              <div style="display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #f9fafb; border-radius: 6px;">
+                ${metrics.map(m => `<span style="font-size: 11px; color: #374151; padding: 2px 6px; background: white; border-radius: 4px;">${m}</span>`).join('')}
+              </div>
+            ` : ''}
+            <div style="font-size: 12px; color: #6b7280; font-style: italic;">Open extension to view ${platformName} metrics</div>
+          </div>
+        `;
+      } else {
+        badgeColor = '#6B7280';
+        borderColor = '#6B7280';
+        badgeContent = `
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 20px; height: 20px; background: #6B7280; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">?</div>
+            <span style="font-weight: 600; color: #1f2937; font-size: 14px;">Insufficient data for analysis</span>
+          </div>
+        `;
+      }
+    } else {
+      // Success state with score
+      const confidenceLevel = scoreData.confidenceLevel || 'Unknown';
+      const recommendations = scoreData.recommendations || [];
+      const riskFactors = scoreData.riskFactors || [];
+      
+      if (pulseScore >= 90) {
+        badgeColor = '#047857';
+        borderColor = '#047857';
+      } else if (pulseScore >= 75) {
+        badgeColor = '#10B981';
+        borderColor = '#10B981';
+      } else if (pulseScore >= 45) {
+        badgeColor = '#F59E0B';
+        borderColor = '#F59E0B';
+      } else {
+        badgeColor = '#EF4444';
+        borderColor = '#EF4444';
+      }
+      
+      let credibilityMessage = '';
+      if (recommendations.length > 0) {
+        const topRecommendation = recommendations[0];
+        credibilityMessage = topRecommendation.message || 'Seller analysis available';
+      } else if (pulseScore >= 90) {
+        credibilityMessage = 'Very high trust';
+      } else if (pulseScore >= 75) {
+        credibilityMessage = 'High trust';
+      } else if (pulseScore >= 45) {
+        credibilityMessage = 'Moderate trust level';
+      } else {
+        credibilityMessage = 'Low trust score - proceed with caution';
+      }
+      
+      const riskIndicator = riskFactors.length > 0 ? `⚠️ ${riskFactors.length} risk${riskFactors.length > 1 ? 's' : ''}` : '';
+      
+      badgeContent = `
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="width: 32px; height: 32px; background: ${badgeColor}; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 16px;">${Math.round(pulseScore)}</div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 2px;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-weight: 700; color: #1f2937; font-size: 16px;">Trust Score: ${Math.round(pulseScore)}/100</span>
+                <span style="padding: 2px 6px; background: ${badgeColor}20; color: ${badgeColor}; border-radius: 4px; font-size: 11px; font-weight: 600;">${confidenceLevel}</span>
+              </div>
+              <span style="font-size: 13px; color: #6b7280;">${credibilityMessage}</span>
+              ${riskIndicator ? `<span style="font-size: 12px; color: #EF4444; font-weight: 500;">${riskIndicator}</span>` : ''}
+            </div>
+          </div>
+          <div style="font-size: 12px; color: #6b7280; font-style: italic;">Open extension to view detailed analysis</div>
+        </div>
+      `;
+    }
+  } else {
+    badgeContent = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="width: 20px; height: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">V</div>
+        <span style="font-weight: 600; color: #1f2937; font-size: 14px;">Analyzing...</span>
+      </div>
+    `;
+  }
+  
+  // Update content and styles in place
+  badge.innerHTML = badgeContent;
+  badge.style.borderColor = borderColor;
+  badge.style.padding = scoreData ? '16px' : '12px 16px';
+  
+  // Update stored data on badge element
+  (badge as any)._profileUrl = profileUrl;
+  (badge as any)._scoreData = scoreData;
+  
+  console.log('Verible: Badge updated in place');
 }
 
 function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, error: string | null) {
@@ -708,14 +1043,17 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
       const riskFactors = scoreData.riskFactors || [];
       
       // Determine color based on score
-      if (pulseScore >= 75) {
-        badgeColor = '#10B981'; // Green
+      if (pulseScore >= 90) {
+        badgeColor = '#047857'; // Dark Green (Very High)
+        borderColor = '#047857';
+      } else if (pulseScore >= 75) {
+        badgeColor = '#10B981'; // Green (High)
         borderColor = '#10B981';
       } else if (pulseScore >= 45) {
-        badgeColor = '#F59E0B'; // Amber
+        badgeColor = '#F59E0B'; // Amber (Medium)
         borderColor = '#F59E0B';
       } else {
-        badgeColor = '#EF4444'; // Red
+        badgeColor = '#EF4444'; // Red (Low)
         borderColor = '#EF4444';
       }
       
@@ -724,8 +1062,10 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
       if (recommendations.length > 0) {
         const topRecommendation = recommendations[0];
         credibilityMessage = topRecommendation.message || 'Seller analysis available';
+      } else if (pulseScore >= 90) {
+        credibilityMessage = 'Very high trust';
       } else if (pulseScore >= 75) {
-        credibilityMessage = 'Highly trustworthy seller';
+        credibilityMessage = 'High trust';
       } else if (pulseScore >= 45) {
         credibilityMessage = 'Moderate trust level';
       } else {
@@ -763,6 +1103,10 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
   }
   
   badge.innerHTML = badgeContent;
+  
+  // Store data on badge element for click handler to access
+  (badge as any)._profileUrl = profileUrl;
+  (badge as any)._scoreData = scoreData;
   
   // Style the badge with improved positioning and responsiveness
   badge.style.cssText = `
@@ -830,43 +1174,54 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
     badge.style.boxShadow = '0 10px 25px rgba(0, 0, 0, 0.15)';
   });
   
-  // Click handler - store data and remove badge (user opens extension manually)
+  // Click handler - open extension popup
   badge.addEventListener('click', async () => {
-    console.log('Verible badge clicked - storing data for extension');
+    console.log('Verible badge clicked - opening extension');
     const runtime = getRuntimeAPI();
     
-    // Store the profile URL for the extension to use
+    // Get stored data from badge element
+    const badgeProfileUrl = (badge as any)._profileUrl || profileUrl;
+    const badgeScoreData = (badge as any)._scoreData || null;
+    
     if (runtime) {
       try {
-        await runtime.sendMessage({
+        // Send message to background script to open extension popup
+        const response = await runtime.sendMessage({
           type: 'OPEN_EXTENSION_FROM_BADGE',
-          data: { profileUrl }
+          data: { 
+            profileUrl: badgeProfileUrl,
+            scoreData: badgeScoreData
+          }
         });
+        
+        console.log('Extension open response:', response);
+        
+        // Remove badge after opening extension (small delay to ensure message is sent)
+        setTimeout(() => {
+          badge.style.opacity = '0';
+          badge.style.transform = 'translateY(-10px)';
+          badge.style.transition = 'all 0.3s ease';
+          setTimeout(() => {
+            if (badge.parentNode) {
+              badge.remove();
+            }
+          }, 300);
+        }, 100);
       } catch (error) {
-        console.error('Error sending message:', error);
+        console.error('Error opening extension:', error);
+        // Still remove badge even if there's an error
+        badge.style.opacity = '0';
+        badge.style.transform = 'translateY(-10px)';
+        badge.style.transition = 'all 0.3s ease';
+        setTimeout(() => {
+          if (badge.parentNode) {
+            badge.remove();
+          }
+        }, 300);
       }
-    }
-    
-    // Clear auto-dismiss timer
-    const timer = (badge as any)._autoDismissTimer;
-    if (timer) {
-      clearTimeout(timer);
-    }
-    
-    // Remove badge immediately after click
-    badge.style.opacity = '0';
-    badge.style.transform = 'translateY(-10px)';
-    badge.style.transition = 'all 0.3s ease';
-    setTimeout(() => {
-      if (badge.parentNode) {
-        badge.remove();
-      }
-    }, 300);
-  });
-  
-  // Auto-dismiss badge after 7 seconds (store timer on badge for cleanup)
-  const autoDismissTimer = setTimeout(() => {
-    if (badge.parentNode) {
+    } else {
+      console.error('Runtime API not available');
+      // Remove badge on error
       badge.style.opacity = '0';
       badge.style.transform = 'translateY(-10px)';
       badge.style.transition = 'all 0.3s ease';
@@ -876,10 +1231,11 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
         }
       }, 300);
     }
-  }, 7000); // 7 seconds
+  });
   
-  // Store timer on badge element so we can clear it if badge is removed early
-  (badge as any)._autoDismissTimer = autoDismissTimer;
+  // Badge stays visible until user clicks it - no auto-dismiss
+  // Store null timer on badge element for compatibility (in case any code checks for it)
+  (badge as any)._autoDismissTimer = null;
   
   // Add to page
   document.body.appendChild(badge);
@@ -1042,7 +1398,7 @@ function openDetailedView(sellerInfo: any, analysisData?: any) {
         <div style="display: flex; gap: 20px; margin-bottom: 20px;">
           <div style="flex: 1;">
             <div style="font-size: 14px; color: #6b7280; margin-bottom: 8px;">Pulse Score</div>
-            <div style="font-size: 32px; font-weight: bold; color: ${pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444'};">${pulseScore}</div>
+            <div style="font-size: 32px; font-weight: bold; color: ${pulseScore >= 90 ? '#047857' : pulseScore >= 75 ? '#10B981' : pulseScore >= 45 ? '#F59E0B' : '#EF4444'};">${pulseScore}</div>
           </div>
           <div style="flex: 1;">
             <div style="font-size: 14px; color: #6b7280; margin-bottom: 8px;">Risk Level</div>

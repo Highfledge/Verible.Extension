@@ -831,6 +831,7 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
   };
 
   const getScoreClass = (score: number) => {
+    if (score >= 90) return 'very-high';
     if (score >= 75) return 'high';
     if (score >= 45) return 'medium';
     return 'low';
@@ -1131,6 +1132,7 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
 
   // Get score class based on pulseScore
   const getPulseScoreClass = (score: number) => {
+    if (score >= 90) return 'very-high';
     if (score >= 75) return 'high';
     if (score >= 45) return 'medium';
     return 'low';

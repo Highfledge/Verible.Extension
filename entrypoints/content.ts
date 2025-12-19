@@ -21,15 +21,25 @@ function getRuntimeAPI() {
   return null;
 }
 
+// Configuration constants
+const CONFIG = {
+  CACHE_EXPIRY_MS: 5 * 60 * 1000, // 5 minutes
+  URL_CHECK_INTERVAL_SELLER: 500, // 500ms for seller profiles
+  URL_CHECK_INTERVAL_GENERAL: 1000, // 1 second for general pages
+  MIN_INITIALIZATION_INTERVAL: 300, // Minimum 300ms between initializations
+  API_TIMEOUT: 30000, // 30 second timeout
+  RETRY_DELAY: 1000, // 1 second base delay
+  MAX_RETRIES: 3,
+  DEBOUNCE_DELAY: 300, // 300ms debounce
+  MUTATION_CHECK_DELAY: 100 // 100ms delay for DOM changes
+} as const;
+
 // Cache for seller analysis results (reduces API calls)
 const analysisCache = new Map<string, {
   data: any;
   timestamp: number;
   expiresAt: number;
 }>();
-
-// Cache expiration time: 5 minutes
-const CACHE_EXPIRY_MS = 5 * 60 * 1000;
 
 // Debounce timer for URL changes
 let urlChangeDebounceTimer: number | null = null;
@@ -38,7 +48,7 @@ let lastProcessedUrl = '';
 let isInitializing = false;
 let pendingRequests = new Map<string, Promise<any>>();
 let lastInitializationTime = 0;
-const MIN_INITIALIZATION_INTERVAL = 300; // Minimum 300ms between initializations
+// Minimum 300ms between initializations
 
 export default defineContentScript({
   matches: [
@@ -77,19 +87,73 @@ export default defineContentScript({
 // Setup URL change monitoring for SPA navigation
 function setupUrlChangeMonitoring() {
   let lastUrl = window.location.href;
-  
-  // Monitor URL changes using MutationObserver and popstate
+  let lastSellerProfileUrl = '';
+
+  // Helper function to check if current URL is a seller profile
+  const isCurrentUrlSellerProfile = () => {
+    const currentUrl = window.location.href;
+    const sellerProfilePatterns = [
+      // Jiji patterns
+      /jiji\.ng\/sellerpage\/[^\/\?\s]+/i,
+      /jiji\.ng\/shop\/[^\/\?\s]+/i,
+      // Etsy patterns
+      /etsy\.com\/shop\/[^\/\?\s]+/i,
+      // eBay patterns
+      /ebay\.com\/str\/[^\/\?\s]+/i,
+      /ebay\.com\/usr\/[^\/\?\s]+/i,
+      // Jumia patterns
+      /jumia\.com\.ng\/seller\/[^\/]+\/profile/i,
+      /jumia\.com\/seller\/[^\/]+\/profile/i,
+      // Konga patterns
+      /konga\.com\/merchant\/[^\/\?\s]+/i,
+      // Kijiji patterns
+      /kijiji\.ca\/o-profile\/[^\/\?\s]+/i,
+      /kijiji\.com\/o-profile\/[^\/\?\s]+/i
+    ];
+
+    return sellerProfilePatterns.some(pattern => pattern.test(currentUrl));
+  };
+
+  // Enhanced URL change detection for seller profiles
   const checkUrlChange = () => {
     const currentUrl = window.location.href;
+    const currentIsSellerProfile = isCurrentUrlSellerProfile();
+
     if (currentUrl !== lastUrl) {
       lastUrl = currentUrl;
-      console.log('Verible: URL changed, re-initializing:', currentUrl);
-      
-      // Debounce to avoid excessive calls
+      console.log('Verible: URL changed:', currentUrl);
+
+      // Special handling for seller profile transitions
+      if (currentIsSellerProfile) {
+        // If we're moving to a different seller profile, trigger immediately
+        if (lastSellerProfileUrl !== currentUrl) {
+          console.log('Verible: Detected seller profile transition:', {
+            from: lastSellerProfileUrl,
+            to: currentUrl
+          });
+          lastSellerProfileUrl = currentUrl;
+
+          // Clear any pending initialization
+          isInitializing = false;
+          if (urlChangeDebounceTimer) {
+            clearTimeout(urlChangeDebounceTimer);
+          }
+
+          // Trigger initialization immediately for seller profiles
+          lastProcessedUrl = currentUrl;
+          initializeVerible();
+          return;
+        }
+      } else {
+        // For non-seller pages, clear the last seller profile URL
+        lastSellerProfileUrl = '';
+      }
+
+      // For other URL changes, use debounce
       if (urlChangeDebounceTimer) {
         clearTimeout(urlChangeDebounceTimer);
       }
-      
+
       urlChangeDebounceTimer = window.setTimeout(() => {
         if (currentUrl !== lastProcessedUrl) {
           lastProcessedUrl = currentUrl;
@@ -97,46 +161,64 @@ function setupUrlChangeMonitoring() {
           isInitializing = false;
           initializeVerible();
         }
-      }, 300); // 300ms debounce for better reliability
+      }, CONFIG.DEBOUNCE_DELAY);
+    } else if (currentIsSellerProfile && lastSellerProfileUrl !== currentUrl) {
+      // Handle cases where URL stays the same but content changes (some SPAs)
+      console.log('Verible: Content changed within same URL, checking seller profile:', currentUrl);
+      lastSellerProfileUrl = currentUrl;
+      isInitializing = false;
+      lastProcessedUrl = currentUrl;
+      initializeVerible();
     }
   };
-  
+
   // Listen for popstate (back/forward navigation)
   window.addEventListener('popstate', checkUrlChange);
-  
-  // Monitor DOM changes that might indicate navigation (but be more selective)
+
+  // Monitor DOM changes that might indicate navigation
   let mutationObserver: MutationObserver | null = null;
-  
+
   const setupMutationObserver = () => {
     if (mutationObserver) {
       mutationObserver.disconnect();
     }
-    
+
     mutationObserver = new MutationObserver((mutations) => {
-      // Only check URL if we see significant DOM changes (new page content)
       let significantChange = false;
+
       for (const mutation of mutations) {
         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-          // Check if added nodes suggest a new page
+          // Check if added nodes suggest a new page or seller content
           for (let i = 0; i < mutation.addedNodes.length; i++) {
             const node = mutation.addedNodes[i] as HTMLElement;
-            if (node && (node.nodeType === Node.ELEMENT_NODE) && 
-                (node.tagName === 'MAIN' || node.tagName === 'ARTICLE' || 
-                 node.classList?.contains('page-content') || 
-                 node.classList?.contains('seller-profile'))) {
-              significantChange = true;
-              break;
+            if (node && (node.nodeType === Node.ELEMENT_NODE)) {
+              // More comprehensive seller profile detection
+              if (node.tagName === 'MAIN' || node.tagName === 'ARTICLE' ||
+                  node.classList?.contains('page-content') ||
+                  node.classList?.contains('seller-profile') ||
+                  node.classList?.contains('shop-content') ||
+                  node.classList?.contains('store-content') ||
+                  node.classList?.contains('profile-content') ||
+                  node.classList?.contains('merchant-content') ||
+                  node.id?.includes('seller') ||
+                  node.id?.includes('shop') ||
+                  node.id?.includes('profile') ||
+                  node.id?.includes('store')) {
+                significantChange = true;
+                break;
+              }
             }
           }
           if (significantChange) break;
         }
       }
-      
+
       if (significantChange) {
-        checkUrlChange();
+        // Small delay to let content settle
+        setTimeout(checkUrlChange, CONFIG.MUTATION_CHECK_DELAY);
       }
     });
-    
+
     if (document.body) {
       mutationObserver.observe(document.body, {
         childList: true,
@@ -144,7 +226,7 @@ function setupUrlChangeMonitoring() {
       });
     }
   };
-  
+
   // Setup observer when DOM is ready
   if (document.body) {
     setupMutationObserver();
@@ -160,9 +242,20 @@ function setupUrlChangeMonitoring() {
       childList: true
     });
   }
-  
-  // Also check periodically (fallback for SPAs that don't trigger events)
-  setInterval(checkUrlChange, 1000); // Reduced from 2000ms to 1000ms for faster detection
+
+  // More frequent checking for seller profiles
+  setInterval(() => {
+    if (isCurrentUrlSellerProfile()) {
+      checkUrlChange();
+    }
+  }, CONFIG.URL_CHECK_INTERVAL_SELLER);
+
+  // General URL checking fallback (less frequent)
+  setInterval(() => {
+    if (!isCurrentUrlSellerProfile()) {
+      checkUrlChange();
+    }
+  }, CONFIG.URL_CHECK_INTERVAL_GENERAL);
 }
 
 function initializeVerible() {
@@ -170,7 +263,7 @@ function initializeVerible() {
   const now = Date.now();
   
   // Prevent rapid successive calls (rate limiting)
-  if (now - lastInitializationTime < MIN_INITIALIZATION_INTERVAL && currentUrl === lastProcessedUrl) {
+  if (now - lastInitializationTime < CONFIG.MIN_INITIALIZATION_INTERVAL && currentUrl === lastProcessedUrl) {
     console.log('Verible: Skipping initialization - too soon after last call for same URL');
     return;
   }
@@ -200,6 +293,18 @@ function initializeVerible() {
     }
 
     console.log(`Verible: Detected ${platform} marketplace on:`, window.location.href);
+
+    // Clear any pending requests from previous URLs to prevent conflicts
+    for (const [url, promise] of pendingRequests.entries()) {
+      if (url !== currentUrl) {
+        console.log('Verible: Cleaning up pending request for different URL:', url);
+        // Don't cancel the promise, just remove it from tracking
+        pendingRequests.delete(url);
+      }
+    }
+
+    // Always clear existing badge when initializing (important for seller profile transitions)
+    removeVeribleBadge();
     
     // Check if current page is a seller profile page
     const currentPath = window.location.pathname;
@@ -286,7 +391,7 @@ function initializeVerible() {
           const response = await sendMessageWithRetry(runtime, {
             type: 'DETECT_SELLER_PAGE',
             data: { profileUrl: currentUrl, platform }
-          }, 3, 1000); // 3 retries, 1 second delay
+          }, CONFIG.MAX_RETRIES, CONFIG.RETRY_DELAY);
           
           console.log('Verible: Background script response:', response);
           
@@ -336,7 +441,7 @@ function cacheAnalysis(url: string, data: any) {
   analysisCache.set(url, {
     data,
     timestamp: now,
-    expiresAt: now + CACHE_EXPIRY_MS
+    expiresAt: now + CONFIG.CACHE_EXPIRY_MS
   });
   console.log('Verible: Cached analysis for:', url);
 }
@@ -367,7 +472,29 @@ function clearExpiredCache() {
 }
 
 // Clean expired cache every minute
-setInterval(clearExpiredCache, 60 * 1000);
+const cacheCleanupInterval = setInterval(clearExpiredCache, 60 * 1000);
+
+// Cleanup function for when the content script is unloaded
+function cleanup() {
+  // Clear all timers
+  if (urlChangeDebounceTimer) {
+    clearTimeout(urlChangeDebounceTimer);
+  }
+  clearInterval(cacheCleanupInterval);
+
+  // Clear all caches
+  analysisCache.clear();
+  pendingRequests.clear();
+
+  // Remove any remaining badges
+  removeVeribleBadge();
+
+  console.log('Verible: Content script cleanup completed');
+}
+
+// Listen for page unload to cleanup
+window.addEventListener('beforeunload', cleanup);
+window.addEventListener('unload', cleanup);
 
 // Helper function to send message with retry logic
 async function sendMessageWithRetry(
@@ -384,7 +511,7 @@ async function sendMessageWithRetry(
       
       // Create a promise with timeout
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Message timeout')), 30000); // 30 second timeout
+        setTimeout(() => reject(new Error('Message timeout')), CONFIG.API_TIMEOUT);
       });
       
       const messagePromise = runtime.sendMessage(message);
@@ -1174,28 +1301,32 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
     badge.style.boxShadow = '0 10px 25px rgba(0, 0, 0, 0.15)';
   });
   
-  // Click handler - open extension popup
+  // Click handler - clear score and open extension popup fresh
   badge.addEventListener('click', async () => {
-    console.log('Verible badge clicked - opening extension');
+    console.log('Verible badge clicked - clearing score and opening extension fresh');
     const runtime = getRuntimeAPI();
-    
+
     // Get stored data from badge element
     const badgeProfileUrl = (badge as any)._profileUrl || profileUrl;
     const badgeScoreData = (badge as any)._scoreData || null;
-    
+
     if (runtime) {
       try {
-        // Send message to background script to open extension popup
+        // First, clear the cached analysis data
+        console.log('Clearing cached analysis data for:', badgeProfileUrl);
+        analysisCache.delete(badgeProfileUrl); // Clear from content script cache
+
+        // Send message to background script to clear score and open extension fresh
         const response = await runtime.sendMessage({
-          type: 'OPEN_EXTENSION_FROM_BADGE',
-          data: { 
+          type: 'CLEAR_SCORE_AND_OPEN_EXTENSION',
+          data: {
             profileUrl: badgeProfileUrl,
             scoreData: badgeScoreData
           }
         });
-        
+
         console.log('Extension open response:', response);
-        
+
         // Remove badge after opening extension (small delay to ensure message is sent)
         setTimeout(() => {
           badge.style.opacity = '0';
@@ -1208,7 +1339,7 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
           }, 300);
         }, 100);
       } catch (error) {
-        console.error('Error opening extension:', error);
+        console.error('Error clearing score and opening extension:', error);
         // Still remove badge even if there's an error
         badge.style.opacity = '0';
         badge.style.transform = 'translateY(-10px)';

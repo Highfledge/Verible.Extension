@@ -335,6 +335,11 @@ export default defineBackground(() => {
           handleOpenExtensionFromBadge(message.data, sendResponse);
           return true;
 
+        case 'CLEAR_SCORE_AND_OPEN_EXTENSION':
+          // Clear the score data and open extension fresh
+          handleClearScoreAndOpenExtension(message.data, sendResponse);
+          return true;
+
         case 'GET_CURRENT_SELLER':
           sendResponse({ success: true, data: currentSellerData });
           return false;
@@ -555,6 +560,88 @@ export default defineBackground(() => {
     } catch (error: any) {
       console.error('Error opening extension from badge:', error);
       if (sendResponse) sendResponse({ success: false, error: error?.message || 'Failed to open extension' });
+    }
+  }
+
+  // Handle clearing score and opening extension fresh
+  async function handleClearScoreAndOpenExtension(data: { profileUrl: string; scoreData?: any }, sendResponse?: Function) {
+    try {
+      if (!data || !data.profileUrl) {
+        console.error('No profile URL provided for clearing score and opening extension');
+        if (sendResponse) sendResponse({ success: false, error: 'No profile URL provided' });
+        return;
+      }
+
+      const profileUrl = data.profileUrl;
+      console.log('Clearing score and opening extension fresh for:', profileUrl);
+
+      // Clear the badge
+      await clearBadge();
+
+      // Clear API cache for this profile URL
+      const cacheKey = `score-by-url:${profileUrl}`;
+      apiCache.delete(cacheKey);
+
+      // Clear stored seller analysis data
+      await storage.removeItem('local:pendingSellerAnalysis');
+      await storage.removeItem('local:openSellerAnalysis');
+
+      // Clear current seller data
+      currentSellerData = null;
+
+      console.log('Score data cleared, now opening extension fresh');
+
+      // Now open the extension fresh (similar to handleOpenExtensionFromBadge but without pre-storing data)
+      const action = getActionAPI();
+      let popupOpened = false;
+
+      if (action && action.openPopup) {
+        try {
+          // Try to open popup - this works in some browsers when called in response to user action
+          await action.openPopup();
+          console.log('Extension popup opened successfully (fresh state)');
+          popupOpened = true;
+        } catch (popupError: any) {
+          console.log('Could not open popup programmatically (this is normal in many browsers):', popupError?.message);
+          // Try alternative: open popup HTML in a new window
+          try {
+            if (browserAPI && browserAPI.runtime && browserAPI.windows) {
+              // Get popup URL - WXT builds popup/index.html to popup.html
+              const popupUrl = browserAPI.runtime.getURL('popup.html');
+              console.log('Attempting to open popup fresh at:', popupUrl);
+
+              // Try to open in a new popup window
+              if (browserAPI.windows.create) {
+                const window = await browserAPI.windows.create({
+                  url: popupUrl,
+                  type: 'popup',
+                  width: 400,
+                  height: 600,
+                  focused: true
+                });
+                if (window && window.id) {
+                  console.log('Extension opened fresh in new popup window');
+                  popupOpened = true;
+                }
+              }
+            }
+          } catch (windowError: any) {
+            console.log('Could not open extension fresh in new window:', windowError?.message);
+          }
+        }
+      }
+
+      if (popupOpened) {
+        if (sendResponse) sendResponse({ success: true, popupOpened: true, message: 'Score cleared and extension opened fresh' });
+        return;
+      }
+
+      // Fallback: Popup couldn't be opened programmatically
+      console.log('Popup cannot be opened programmatically - extension will open fresh when clicked');
+      if (sendResponse) sendResponse({ success: true, popupOpened: false, message: 'Score cleared - click the extension icon to open fresh' });
+    } catch (error: any) {
+      console.error('Error clearing score and opening extension:', error);
+      if (sendResponse) sendResponse({ success: false, error: error?.message || 'Failed to clear score and open extension' });
     }
   }
 

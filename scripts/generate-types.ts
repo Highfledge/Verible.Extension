@@ -101,7 +101,7 @@ async function generateTypes(): Promise<TypeGenerationResult> {
           await postmanToOpenApi(collectionPath, tempOpenApiPath, {
             info: {
               title: "Verible API",
-              version: "1.0.8",
+              version: "1.1.3",
               description: "Verible Backend API"
             },
             servers: [{
@@ -134,7 +134,7 @@ async function generateTypes(): Promise<TypeGenerationResult> {
         openapi: "3.0.0",
         info: {
           title: "Verible API",
-          version: "1.0.8",
+          version: "1.1.3",
           description: "Verible Backend API"
         },
         servers: [

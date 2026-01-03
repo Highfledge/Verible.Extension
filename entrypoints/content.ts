@@ -50,6 +50,19 @@ let pendingRequests = new Map<string, Promise<any>>();
 let lastInitializationTime = 0;
 // Minimum 300ms between initializations
 
+function detectMarketplaceFromUrl(): string {
+  const host = window.location.hostname.toLowerCase();
+
+  if (host.includes('etsy.com')) return 'etsy';
+  if (host.includes('ebay.com')) return 'ebay';
+  if (host.includes('jiji')) return 'jiji';
+  if (host.includes('jumia')) return 'jumia';
+  if (host.includes('konga')) return 'konga';
+  if (host.includes('kijiji')) return 'kijiji';
+
+  return 'unknown';
+}
+
 export default defineContentScript({
   matches: [
     '*://*.jiji.ng/*',
@@ -1303,56 +1316,35 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
   
   // Click handler - clear score and open extension popup fresh
   badge.addEventListener('click', async () => {
-    console.log('Verible badge clicked - clearing score and opening extension fresh');
-    const runtime = getRuntimeAPI();
+  console.log('Verible badge clicked - opening extension with persisted seller');
 
-    // Get stored data from badge element
-    const badgeProfileUrl = (badge as any)._profileUrl || profileUrl;
-    const badgeScoreData = (badge as any)._scoreData || null;
+  const runtime = getRuntimeAPI();
+  if (!runtime) {
+    console.error('Runtime API not available');
+    return;
+  }
 
-    if (runtime) {
-      try {
-        // First, clear the cached analysis data
-        console.log('Clearing cached analysis data for:', badgeProfileUrl);
-        analysisCache.delete(badgeProfileUrl); // Clear from content script cache
+  const badgeProfileUrl = (badge as any)._profileUrl || profileUrl;
+  const badgeScoreData = (badge as any)._scoreData || null;
 
-        // Send message to background script to clear score and open extension fresh
-        const response = await runtime.sendMessage({
-          type: 'CLEAR_SCORE_AND_OPEN_EXTENSION',
-          data: {
-            profileUrl: badgeProfileUrl,
-            scoreData: badgeScoreData
-          }
-        });
-
-        console.log('Extension open response:', response);
-
-        // Remove badge after opening extension (small delay to ensure message is sent)
-        setTimeout(() => {
-          badge.style.opacity = '0';
-          badge.style.transform = 'translateY(-10px)';
-          badge.style.transition = 'all 0.3s ease';
-          setTimeout(() => {
-            if (badge.parentNode) {
-              badge.remove();
-            }
-          }, 300);
-        }, 100);
-      } catch (error) {
-        console.error('Error clearing score and opening extension:', error);
-        // Still remove badge even if there's an error
-        badge.style.opacity = '0';
-        badge.style.transform = 'translateY(-10px)';
-        badge.style.transition = 'all 0.3s ease';
-        setTimeout(() => {
-          if (badge.parentNode) {
-            badge.remove();
-          }
-        }, 300);
+  try {
+    await runtime.sendMessage({
+      type: 'SET_ACTIVE_SELLER',
+      data: {
+        profileUrl: badgeProfileUrl,
+        platform: detectMarketplaceFromUrl(),
+        scoreData: badgeScoreData,
+        detectedAt: Date.now()
       }
-    } else {
-      console.error('Runtime API not available');
-      // Remove badge on error
+    });
+
+    const response = await runtime.sendMessage({
+      type: 'OPEN_POPUP'
+    });
+
+    console.log('Extension open response:', response);
+
+    setTimeout(() => {
       badge.style.opacity = '0';
       badge.style.transform = 'translateY(-10px)';
       badge.style.transition = 'all 0.3s ease';
@@ -1361,8 +1353,24 @@ function createBadge(profileUrl: string, isLoading: boolean, scoreData: any, err
           badge.remove();
         }
       }, 300);
-    }
-  });
+    }, 100);
+
+  } catch (error) {
+    console.error('Error opening extension with seller data:', error);
+
+    badge.style.opacity = '0';
+    badge.style.transform = 'translateY(-10px)';
+    badge.style.transition = 'all 0.3s ease';
+    setTimeout(() => {
+      if (badge.parentNode) {
+        badge.remove();
+      }
+    }, 300);
+  }
+});
+
+  
+  
   
   // Badge stays visible until user clicks it - no auto-dismiss
   // Store null timer on badge element for compatibility (in case any code checks for it)

@@ -37,10 +37,10 @@ function App() {
       const browser = (window as any).chrome || (window as any).browser;
       if (!browser?.storage) return;
 
-      const result = await browser.storage.local.get(['pendingSellerAnalysis', 'openSellerAnalysis']);
+      const result = await browser.storage.local.get(['activeSellerContext', 'activeSellerUpdatedAt']);
       
-      if (result.openSellerAnalysis && result.pendingSellerAnalysis) {
-        setPendingSellerAnalysis(result.pendingSellerAnalysis);
+      if (result.activeSellerContext && result.activeSellerUpdatedAt) {
+        setPendingSellerAnalysis(result.activeSellerContext);
         
         // Clear the flag
         await browser.storage.local.remove(['openSellerAnalysis']);
@@ -216,7 +216,7 @@ function App() {
               // Clear from storage
               const browser = (window as any).chrome || (window as any).browser;
               if (browser?.storage) {
-                browser.storage.local.remove(['pendingSellerAnalysis']);
+                browser.storage.local.remove(['activeSellerContext', 'activeSellerUpdatedAt']);
               }
             }}
           />

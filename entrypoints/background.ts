@@ -343,6 +343,32 @@ export default defineBackground(() => {
         case 'GET_CURRENT_SELLER':
           sendResponse({ success: true, data: currentSellerData });
           return false;
+        
+          case 'SET_ACTIVE_SELLER':
+            console.log('Verible: Persisting active seller for popup');
+          
+            // Persist seller data so popup can reliably read it
+            browserAPI.storage.local.set({
+              activeSeller: {
+                ...message.data,
+                savedAt: Date.now()
+              }
+            }).then(() => {
+              sendResponse({ success: true });
+            }).catch((err: any) => {
+              console.error('Failed to store active seller:', err);
+              sendResponse({ success: false, error: err });
+            });
+          
+            return true; // async response
+          
+          
+          case 'OPEN_POPUP':
+            console.log('Verible: Opening extension popup');
+            browserAPI.action.openPopup();
+            sendResponse({ success: true });
+            return false;
+          
           
         default:
           console.log('Verible: Unknown message type:', message.type);
@@ -1049,11 +1075,6 @@ export default defineBackground(() => {
     }
   });
 
-  // Initialize: clear badge on startup and test API availability
-  console.log('Verible: Initializing badge system...');
-  console.log('Browser API available:', !!browserAPI);
-  console.log('Action API available:', !!getActionAPI());
-  console.log('Tabs API available:', !!browserAPI.tabs);
   
   // Test badge API on startup
   const action = getActionAPI();

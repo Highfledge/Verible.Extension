@@ -8,15 +8,18 @@ import './Dashboard.css';
 declare const chrome: any;
 declare const browser: any;
 
+interface MarketplaceSellerData {
+  marketplace: string;
+  sellerId: string;
+  sellerName: string;
+  profileUrl: string;
+  trustScore: number;
+}
+
 interface DashboardProps {
   user: any;
   onLogout: () => void;
-  pendingSellerAnalysis?: {
-    profileUrl: string;
-    sellerId?: string;
-    pulseScore?: number;
-    riskLevel?: string;
-  } | null;
+  pendingSellerAnalysis?: MarketplaceSellerData | null;
   onPendingSellerAnalysisHandled?: () => void;
 }
 
@@ -450,31 +453,56 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
           setIsLoadingSellerDetail(true);
           setShowSellerDetail(true);
 
-          if (pendingSellerAnalysis.sellerId) {
-            // Fetch seller by ID
-            const response = await apiService.getSellerById(pendingSellerAnalysis.sellerId);
-            if (response.success && response.data) {
-              setSelectedSeller(response.data.seller);
-              setSellerDetailData({
-                seller: response.data.seller,
-                scoringResult: response.data.scoringResult,
-              });
+          // Use the simplified seller data directly
+          const sellerData = pendingSellerAnalysis;
+          setSellerDetailData({
+            seller: {
+              _id: sellerData.sellerId,
+              sellerId: sellerData.sellerId,
+              platform: sellerData.marketplace,
+              profileUrl: sellerData.profileUrl,
+              pulseScore: sellerData.trustScore,
+              confidenceLevel: 'medium' as const,
+              verificationStatus: 'unknown',
+              isActive: true,
+              isClaimed: false,
+              profileData: {
+                name: sellerData.sellerName,
+                profilePicture: null,
+                location: '',
+                bio: ''
+              },
+              marketplaceData: {
+                accountAge: 0,
+                totalListings: 0,
+                avgRating: 0,
+                totalReviews: 0,
+                responseRate: 0,
+                verificationStatus: 'unknown',
+                followers: 0,
+                categories: []
+              }
+            },
+            scoringResult: {
+              pulseScore: sellerData.trustScore,
+              confidenceLevel: 'medium' as const,
+              recommendations: [{
+                type: 'trust',
+                message: `Trust score: ${sellerData.trustScore}/100`,
+                action: 'Proceed with caution'
+              }],
+              trustIndicators: {
+                accountVerification: 'unknown',
+                transactionHistory: 'unknown',
+                communicationQuality: 'unknown',
+                disputeResolution: 'unknown'
+              },
+              riskFactors: []
             }
-          } else if (pendingSellerAnalysis.profileUrl) {
-            // Extract seller profile from URL
-            const response = await apiService.extractSellerProfile(pendingSellerAnalysis.profileUrl);
-            if (response.success && response.data) {
-              const sellerData = response.data.seller;
-              setSelectedSeller(sellerData);
-              setSellerDetailData({
-                seller: sellerData,
-                scoringResult: response.data.scoringResult,
-              });
-            }
-          }
+          });
 
           setIsLoadingSellerDetail(false);
-          
+
           // Notify parent that we've handled the pending analysis
           if (onPendingSellerAnalysisHandled) {
             onPendingSellerAnalysisHandled();
@@ -701,29 +729,29 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
     setError('');
 
     try {
-      const recentResponse = await apiService.getRecentAnalyses(10);
+      // const recentResponse = await apiService.getRecentAnalyses(10);
 
-      if (recentResponse.success && recentResponse.data) {
-        setRecentAnalyses(recentResponse.data);
+      // if (recentResponse.success && recentResponse.data) {
+      //   setRecentAnalyses(recentResponse.data);
 
-        if (recentResponse.data.length > 0) {
-          setCurrentAnalysis(recentResponse.data[0]);
-        }
-      }
+      //   if (recentResponse.data.length > 0) {
+      //     setCurrentAnalysis(recentResponse.data[0]);
+      //   }
+      // }
 
-      const historyResponse = await apiService.getAnalysisHistory(100);
+      // const historyResponse = await apiService.getAnalysisHistory(100);
 
-      if (historyResponse.success && historyResponse.data) {
-        const analyses = historyResponse.data.analyses;
-        setStats({
-          totalAnalyses: historyResponse.data.total || analyses.length,
-          averageScore: analyses.length > 0
-            ? Math.round(analyses.reduce((sum, a) => sum + a.score, 0) / analyses.length)
-            : 0,
-          trustedCount: analyses.filter(a => a.riskLevel === 'Trusted').length,
-          avoidCount: analyses.filter(a => a.riskLevel === 'Avoid').length
-        });
-      }
+      // if (historyResponse.success && historyResponse.data) {
+      //   const analyses = historyResponse.data.analyses;
+      //   setStats({
+      //     totalAnalyses: historyResponse.data.total || analyses.length,
+      //     averageScore: analyses.length > 0
+      //       ? Math.round(analyses.reduce((sum, a) => sum + a.score, 0) / analyses.length)
+      //       : 0,
+      //     trustedCount: analyses.filter(a => a.riskLevel === 'Trusted').length,
+      //     avoidCount: analyses.filter(a => a.riskLevel === 'Avoid').length
+      //   });
+      // }
 
     } catch (error: any) {
       console.error('Error fetching dashboard data:', error);
@@ -1718,7 +1746,7 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
   };
 
   // Loading state
-  if (isLoading && recentAnalyses.length === 0) {
+  if (isLoading) {
     return (
       <div className="dashboard-container metamask-style">
         <div className="loading-container">

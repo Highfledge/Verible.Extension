@@ -37,13 +37,24 @@ function App() {
       const browser = (window as any).chrome || (window as any).browser;
       if (!browser?.storage) return;
 
-      const result = await browser.storage.local.get(['activeSellerContext', 'activeSellerUpdatedAt']);
+      const result = await browser.storage.local.get([
+        'activeSellerContext',
+        'activeSellerUpdatedAt',
+        'pendingSellerAnalysis',
+        'openSellerAnalysis',
+      ]);
       
       if (result.activeSellerContext && result.activeSellerUpdatedAt) {
         setPendingSellerAnalysis(result.activeSellerContext);
         
         // Clear the flag
         await browser.storage.local.remove(['openSellerAnalysis']);
+        return;
+      }
+
+      // Fallback: legacy key (some flows store seller data as pendingSellerAnalysis/openSellerAnalysis)
+      if (result.pendingSellerAnalysis) {
+        setPendingSellerAnalysis(result.pendingSellerAnalysis);
       }
     } catch (error) {
       console.error('Error checking pending seller analysis:', error);

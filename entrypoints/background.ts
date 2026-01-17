@@ -44,6 +44,24 @@ export default defineBackground(() => {
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 1000; // 1 second initial delay
 
+  // Helper: storage.local.set that works for both callback- and promise-based APIs
+  function storageLocalSet(items: Record<string, any>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        const maybePromise = browserAPI?.storage?.local?.set?.(items, () => {
+          const err = browserAPI?.runtime?.lastError;
+          if (err) reject(err);
+          else resolve();
+        });
+        if (maybePromise && typeof (maybePromise as any).then === 'function') {
+          (maybePromise as any).then(() => resolve()).catch(reject);
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
   // Helper function to make API requests with retry logic
   async function makeApiRequest(
     endpoint: string, 
@@ -406,10 +424,10 @@ export default defineBackground(() => {
         });
       }
     } catch (error) {
-      console.error('Verible: Error analyzing seller:', error);
+      console.error('Verible: Seller cannot be analyzed right now: please try again later', error);
       sendResponse({
         success: false,
-        error: 'Failed to analyze seller'
+        error: 'Seller cannot be analyzed right now: please try again later'
       });
     }
   }
@@ -528,6 +546,23 @@ export default defineBackground(() => {
       // Store/update the seller data for popup to use
       await storage.setItem('local:pendingSellerAnalysis', sellerData);
       await storage.setItem('local:openSellerAnalysis', true);
+
+      // Also store a popup-friendly minimal context in browser.storage.local so the React popup can reliably read it
+      try {
+        const activeSellerContext = {
+          marketplace: sellerData?.platform || 'unknown',
+          sellerId: sellerData?.sellerId || sellerData?.profileUrl || profileUrl,
+          sellerName: sellerData?.profileData?.name || 'Unknown Seller',
+          profileUrl: sellerData?.profileUrl || profileUrl,
+          trustScore: typeof sellerData?.pulseScore === 'number' ? sellerData.pulseScore : 0,
+        };
+        await storageLocalSet({
+          activeSellerContext,
+          activeSellerUpdatedAt: Date.now(),
+        });
+      } catch (e) {
+        console.warn('Could not persist activeSellerContext to browser.storage.local:', e);
+      }
       
       console.log('Stored seller data for popup:', sellerData);
 
@@ -768,8 +803,19 @@ export default defineBackground(() => {
               storage.setItem('local:openSellerAnalysis', true)
             );
 
+            const popupContextUpdate = storageLocalSet({
+              activeSellerContext: {
+                marketplace: platform || 'unknown',
+                sellerId: profileUrl,
+                sellerName: profileData?.name || 'Unknown Seller',
+                profileUrl,
+                trustScore: typeof pulseScore === 'number' ? pulseScore : 0,
+              },
+              activeSellerUpdatedAt: Date.now(),
+            });
+
             // Wait for both to complete, then send response
-            await Promise.all([badgeUpdate, storageUpdate]);
+            await Promise.all([badgeUpdate, storageUpdate, popupContextUpdate]);
 
             safeSendResponse({
               success: true,
@@ -813,6 +859,21 @@ export default defineBackground(() => {
               hasMarketplaceData: true
             });
             await storage.setItem('local:openSellerAnalysis', true);
+
+            try {
+              await storageLocalSet({
+                activeSellerContext: {
+                  marketplace: platform || 'unknown',
+                  sellerId: profileUrl,
+                  sellerName: profileData?.name || 'Unknown Seller',
+                  profileUrl,
+                  trustScore: 0,
+                },
+                activeSellerUpdatedAt: Date.now(),
+              });
+            } catch (e) {
+              console.warn('Could not persist activeSellerContext to browser.storage.local:', e);
+            }
 
             safeSendResponse({
               success: true,
@@ -923,7 +984,18 @@ export default defineBackground(() => {
             }).then(() => storage.setItem('local:openSellerAnalysis', true));
 
             // Wait for both to complete
-            await Promise.all([badgeUpdate, storageUpdate]);
+            const popupContextUpdate = storageLocalSet({
+              activeSellerContext: {
+                marketplace: platform || 'unknown',
+                sellerId: profileUrl,
+                sellerName: profileData?.name || 'Unknown Seller',
+                profileUrl,
+                trustScore: typeof pulseScore === 'number' ? pulseScore : 0,
+              },
+              activeSellerUpdatedAt: Date.now(),
+            });
+
+            await Promise.all([badgeUpdate, storageUpdate, popupContextUpdate]);
 
             safeSendResponse({
               success: true,
@@ -971,6 +1043,21 @@ export default defineBackground(() => {
               hasMarketplaceData: true
             });
             await storage.setItem('local:openSellerAnalysis', true);
+
+            try {
+              await storageLocalSet({
+                activeSellerContext: {
+                  marketplace: platform || 'unknown',
+                  sellerId: profileUrl,
+                  sellerName: profileData?.name || 'Unknown Seller',
+                  profileUrl,
+                  trustScore: 0,
+                },
+                activeSellerUpdatedAt: Date.now(),
+              });
+            } catch (e) {
+              console.warn('Could not persist activeSellerContext to browser.storage.local:', e);
+            }
 
             if (sendResponse) {
               sendResponse({

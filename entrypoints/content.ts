@@ -423,7 +423,7 @@ function initializeVerible() {
           }
         } catch (error: any) {
           console.error('Verible: Error notifying background script:', error);
-          showVeribleBadge(currentUrl, false, null, 'Error analyzing seller');
+          showVeribleBadge(currentUrl, false, null, 'Seller cannot be analyzed right now: please try again later');
           throw error;
         } finally {
           // Clean up pending request

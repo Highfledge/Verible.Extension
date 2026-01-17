@@ -455,8 +455,7 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
 
           // Use the simplified seller data directly
           const sellerData = pendingSellerAnalysis;
-          setSellerDetailData({
-            seller: {
+          const synthesizedSeller: Seller = {
               _id: sellerData.sellerId,
               sellerId: sellerData.sellerId,
               platform: sellerData.marketplace,
@@ -482,7 +481,13 @@ export default function Dashboard({ user, onLogout, pendingSellerAnalysis, onPen
                 followers: 0,
                 categories: []
               }
-            },
+            };
+
+          // Modal UI renders off `selectedSeller`
+          setSelectedSeller(synthesizedSeller);
+
+          setSellerDetailData({
+            seller: synthesizedSeller,
             scoringResult: {
               pulseScore: sellerData.trustScore,
               confidenceLevel: 'medium' as const,

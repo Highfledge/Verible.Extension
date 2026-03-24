@@ -17,7 +17,7 @@ Template file showing all available environment variables. Copy this to `.env` a
 
 | Variable | Description | Default Value |
 |----------|-------------|----------------|
-| `VITE_API_BASE_URL` | Your API base URL | `https://verible-backend.vercel.app` |
+| `VITE_API_BASE_URL` | Your API base URL | `https://verible-backend-gamma.vercel.app` |
 | `VITE_API_DOCS_URL` | Postman documentation URL | `https://documenter.getpostman.com/view/36179911/2sB3QMK8Z5` |
 | `VITE_APP_NAME` | Application name | `Verible` |
 | `VITE_APP_VERSION` | Application version | `1.0.0` |
@@ -28,7 +28,7 @@ Template file showing all available environment variables. Copy this to `.env` a
 import { config } from '../config/env';
 
 // Access configuration
-console.log(config.apiBaseUrl);     // https://verible-backend.vercel.app
+console.log(config.apiBaseUrl);     // https://verible-backend-gamma.vercel.app
 console.log(config.appName);        // Verible
 console.log(config.isDevelopment);  // true in dev mode
 ```
@@ -38,7 +38,7 @@ console.log(config.isDevelopment);  // true in dev mode
 ### Development
 ```bash
 # .env.development
-VITE_API_BASE_URL=https://verible-backend.vercel.app
+VITE_API_BASE_URL=https://verible-backend-gamma.vercel.app
 VITE_API_DOCS_URL=https://documenter.getpostman.com/view/36179911/2sB3QMK8Z5
 VITE_APP_NAME=Verible
 VITE_APP_VERSION=1.0.0
@@ -47,7 +47,7 @@ VITE_APP_VERSION=1.0.0
 ### Production
 ```bash
 # .env.production
-VITE_API_BASE_URL=https://verible-backend.vercel.app
+VITE_API_BASE_URL=https://verible-backend-gamma.vercel.app
 VITE_API_DOCS_URL=https://documenter.getpostman.com/view/36179911/2sB3QMK8Z5
 VITE_APP_NAME=Verible
 VITE_APP_VERSION=1.0.0

@@ -2,12 +2,12 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Verible API",
-    "version": "1.1.6",
+    "version": "1.1.7",
     "description": "Verible Backend API"
   },
   "servers": [
     {
-      "url": "https://verible-backend.vercel.app",
+      "url": "https://verible-backend-gamma.vercel.app",
       "description": "Production server"
     }
   ],

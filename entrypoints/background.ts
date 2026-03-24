@@ -22,7 +22,7 @@ export default defineBackground(() => {
   });
 
   // API configuration
-  const API_BASE_URL = 'https://verible-backend.vercel.app';
+  const API_BASE_URL = 'https://verible-backend-gamma.vercel.app';
 
   // Current seller data being tracked
   let currentSellerData: {

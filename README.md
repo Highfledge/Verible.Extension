@@ -49,9 +49,9 @@
    
    Edit `.env` and configure:
    ```env
-   VITE_API_BASE_URL=https://verible-backend.vercel.app
+   VITE_API_BASE_URL=https://verible-backend-gamma.vercel.app
    VITE_APP_NAME=Verible
-   VITE_APP_VERSION=1.1.6
+   VITE_APP_VERSION=1.1.7
    ```
 
 4. **Generate TypeScript types from API**
@@ -168,7 +168,7 @@ highfledge/
 
 ## 🔌 API Integration
 
-The extension connects to the Verible backend API at `https://verible-backend.vercel.app`.
+The extension connects to the Verible backend API at `https://verible-backend-gamma.vercel.app`.
 
 ### Key Endpoints
 
@@ -305,13 +305,13 @@ This project is private and proprietary.
 
 ## 🔗 Links
 
-- **Backend API**: https://verible-backend.vercel.app
+- **Backend API**: https://verible-backend-gamma.vercel.app
 - **API Documentation**: https://documenter.getpostman.com/view/36179911/2sB3QMK8Z5
 - **WXT Framework**: https://wxt.dev/
 
 ## 📊 Version History
 
-- **1.1.6** - Current version
+- **1.1.7** - Current version
   - Authentication system
   - Dashboard implementation
   - Badge notifications

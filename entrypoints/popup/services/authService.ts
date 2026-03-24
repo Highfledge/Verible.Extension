@@ -206,7 +206,7 @@ class AuthService {
   // Validate token with server
   async validateToken(token: string): Promise<{ valid: boolean; user?: User; error?: string }> {
     try {
-      const response = await fetch('https://verible-backend.vercel.app/api/auth/me', {
+      const response = await fetch('https://verible-backend-gamma.vercel.app/api/auth/me', {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -237,7 +237,7 @@ class AuthService {
   // Refresh token if available
   async refreshToken(refreshToken: string): Promise<{ success: boolean; token?: string; user?: User; error?: string }> {
     try {
-      const response = await fetch('https://verible-backend.vercel.app/api/auth/refresh', {
+      const response = await fetch('https://verible-backend-gamma.vercel.app/api/auth/refresh', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

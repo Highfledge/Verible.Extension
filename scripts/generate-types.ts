@@ -40,7 +40,7 @@ async function generateTypes(): Promise<TypeGenerationResult> {
   try {
     // Load environment variables with proper typing
     const config: ApiConfig = {
-      baseUrl: process.env.VITE_API_BASE_URL || 'https://verible-backend.vercel.app',
+      baseUrl: process.env.VITE_API_BASE_URL || 'https://verible-backend-gamma.vercel.app',
       docsUrl: process.env.VITE_API_DOCS_URL || 'https://documenter.getpostman.com/view/36179911/2sB3QMK8Z5'
     };
     
@@ -101,7 +101,7 @@ async function generateTypes(): Promise<TypeGenerationResult> {
           await postmanToOpenApi(collectionPath, tempOpenApiPath, {
             info: {
               title: "Verible API",
-              version: "1.1.6",
+              version: "1.1.7",
               description: "Verible Backend API"
             },
             servers: [{
@@ -134,7 +134,7 @@ async function generateTypes(): Promise<TypeGenerationResult> {
         openapi: "3.0.0",
         info: {
           title: "Verible API",
-          version: "1.1.6",
+          version: "1.1.7",
           description: "Verible Backend API"
         },
         servers: [

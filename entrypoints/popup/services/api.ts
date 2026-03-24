@@ -2,7 +2,7 @@
 declare const browser: any;
 declare const chrome: any;
 
-const API_BASE_URL = 'https://verible-backend.vercel.app';
+const API_BASE_URL = 'https://verible-backend-gamma.vercel.app';
 
 // Import authService to get token
 import { authService } from './authService';

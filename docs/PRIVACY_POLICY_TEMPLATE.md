@@ -73,7 +73,7 @@ We use the collected information for:
 ## 5. Third-Party Services
 
 ### 5.1 Backend API
-We use our own backend service at `https://verible-backend.vercel.app` for:
+We use our own backend service at `https://verible-backend-gamma.vercel.app` for:
 - User authentication
 - Seller analysis processing
 - Trust score calculations
